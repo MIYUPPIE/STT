@@ -1,0 +1,11 @@
+# secrets — never commit
+.env
+
+__pycache__/
+*.pyc
+*.wav
+
+# model weights — never commit (use the download steps in the service READMEs)
+mms-tts-yor/
+whisper-small-yoruba/
+whisper-small-yoruba-ct2/

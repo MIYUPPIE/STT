@@ -1,0 +1,20 @@
+{"text": "yà sí ọ̀tún", "action": "right", "note": "turn right (rule)"}
+{"text": "yíjú sí ọ̀tún", "action": "right", "note": "face right (rule)"}
+{"text": "ọ̀tún", "action": "right", "note": "bare right (rule)"}
+{"text": "yà sí òsì", "action": "left", "note": "turn left (rule)"}
+{"text": "yíjú sí òsì díẹ̀", "action": "left", "note": "turn left a bit (rule)"}
+{"text": "padà sí àárín", "action": "center", "note": "back to center (rule)"}
+{"text": "dúró sí àárín gbùngbùn", "action": "center", "note": "middle (rule)"}
+{"text": "dúró", "action": "stop", "note": "stop/hold (rule)"}
+{"text": "má ṣe yí mọ́", "action": "stop", "note": "don't move anymore (grok)"}
+{"text": "lọ sí ọgọ́ta digiri", "action": "angle", "angle": 60, "note": "go to 60 deg (rule)"}
+{"text": "yí sí 45 digiri", "action": "angle", "angle": 45, "note": "45 deg digits (rule)"}
+{"text": "lọ sí ọgbọ̀n digiri", "action": "angle", "angle": 30, "note": "30 deg word (rule)"}
+{"text": "gbé e dé àádọ́rùn-ún digiri", "action": "angle", "angle": 90, "note": "90 deg (rule)"}
+{"text": "ṣí i sílẹ̀ pátápátá", "action": "open", "note": "open fully (grok)"}
+{"text": "tì í pa", "action": "close", "note": "shut it (grok)"}
+{"text": "yíjú sí ọ̀tún jọjọ", "action": "right", "note": "far right (rule)"}
+{"text": "báwo ni o ṣe wà lónìí", "action": "none", "note": "greeting, not a command"}
+{"text": "mo fẹ́ jẹun", "action": "none", "note": "i want to eat, not a command"}
+{"text": "ó ń sáré títí", "action": "none", "note": "'continuously' must NOT read as close"}
+{"text": "kò sí ìṣòro", "action": "none", "note": "'no problem' must NOT read as left"}

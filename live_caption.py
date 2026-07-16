@@ -40,6 +40,8 @@ from services.tts import config as tts_cfg
 from services.tts.engine import build_tts, chunk_text
 from services.tts.contract import SynthRequest
 from services.tts.speak import play as tts_play
+from services.servo import config as servo_cfg
+from services.servo.controller import build_controller
 
 # ---------------- config ----------------
 SAMPLE_RATE = 16000
@@ -114,6 +116,7 @@ raw_q = queue.Queue()
 final_q = queue.Queue()
 refine_q = queue.Queue()          # finalized text awaiting LLM suggestion
 chat_q = queue.Queue()            # finalized utterance awaiting a brain reply
+servo_q = queue.Queue()           # finalized utterance awaiting a servo command
 tts_q = queue.Queue()             # text sentences awaiting synthesis (None = EOR)
 audio_q = queue.Queue()           # synthesized audio chunks awaiting playback
 partial_lock = threading.Lock()
@@ -178,6 +181,16 @@ class Console:
             sys.stdout.write("\033[36m   ⟵ " + text + "\033[0m\n")
             sys.stdout.flush()
 
+    def action(self, text):
+        """A servo move (--servo). Bright yellow ⚙ so device actions stand out
+        from captions and replies."""
+        with self.lock:
+            if self.live:                      # wipe any partial under the cursor
+                sys.stdout.write("\r" + " " * self.live + "\r")
+                self.live = 0
+            sys.stdout.write("\033[33m   ⚙ " + text + "\033[0m\n")
+            sys.stdout.flush()
+
 
 def audio_cb(indata, frames, t, status):
     if status:
@@ -240,7 +253,7 @@ def segmenter():
 
 
 # ---------------- stage 3: decoder + printer ----------------
-def decoder(model, console, suggestions_on, speak_on, chat_on):
+def decoder(model, console, suggestions_on, speak_on, chat_on, servo_on):
     last_ver = 0
 
     def decode(audio):
@@ -253,6 +266,8 @@ def decoder(model, console, suggestions_on, speak_on, chat_on):
             text = "" if seg is None else decode(seg)
             console.final(text)                       # print raw caption now
             if text:
+                if servo_on:
+                    servo_q.put(text)                 # drive the servo (parallel path)
                 if chat_on:
                     chat_q.put(text)                  # brain replies -> speak async
                 elif suggestions_on:
@@ -317,6 +332,30 @@ def brain_thread(brain, console, speak_on):
                 enqueue_speech(res.reply)             # speak the reply aloud
         elif not res.ok:
             print(f"[brain error] {res.error}", file=sys.stderr)
+
+
+# ---------------- stage 4c: servo controller (Yoruba command -> ESP32) --------
+def servo_thread(controller, console):
+    """Pops each finalized caption, parses it into a servo intent (offline rules
+    first, Grok fallback for the rest), and drives the ESP32 over HTTP. Only
+    prints when a real move happens or a command failed, so ordinary speech that
+    isn't a command stays silent. Lives on its own thread so the network round-
+    trip never blocks the mic, segmenter, or decode."""
+    while not stop.is_set():
+        try:
+            text = servo_q.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        try:
+            res = controller.handle(text)
+        except Exception as e:
+            print(f"[servo error] {e}", file=sys.stderr)
+            continue
+        if res.moved:
+            console.action(f"{res.intent.action} -> {res.angle}°  "
+                           f"({res.intent.source}, {res.latency_ms:.0f} ms)")
+        elif not res.ok:
+            print(f"[servo error] {res.error}", file=sys.stderr)
 
 
 # ---------------- stage 5: TTS, split into synth + play so they overlap -------
@@ -384,6 +423,10 @@ def parse_args():
                          "assistant). Replaces the correction step.")
     ap.add_argument("--speak", action="store_true",
                     help="read each corrected caption aloud (half-duplex)")
+    ap.add_argument("--servo", action="store_true",
+                    help="drive the ESP32-S3 servo from Yoruba voice commands "
+                         "(e.g. 'yà sí ọ̀tún', 'padà sí àárín', 'ọgọ́ta digiri'). "
+                         "Works alongside captioning/refine/chat.")
     return ap.parse_args()
 
 
@@ -448,12 +491,35 @@ def main():
             print("unavailable - no speech.")
             print(f"  reason: {tts.last_error}")
 
+    # Servo control (ESP32-S3 over HTTP). --servo parses each caption into a servo
+    # command (offline Yoruba rules first, Grok fallback for the rest) and drives
+    # the board. Probe it once; if the board is unreachable, warn and keep going
+    # (captioning still works) instead of crashing.
+    controller = None
+    servo_on = False
+    if args.servo and servo_cfg.ENABLED:
+        print(f"Checking servo board ({servo_cfg.HOST})...", end=" ", flush=True)
+        controller = build_controller()
+        if controller.health():
+            print(f"ok. Servo control on (angle={controller.angle}°).")
+            servo_on = True
+        else:
+            print("unreachable - servo control off.")
+            print(f"  reason: {controller.last_error}")
+            print(f"  fix: flash firmware/esp32s3_servo, or set SERVO_HOST in .env")
+    elif args.servo:
+        print("Servo disabled (SERVO_ENABLED=0).")
+
     threads = [
         threading.Thread(target=segmenter, daemon=True),
         threading.Thread(target=decoder,
-                         args=(model, console, suggestions_on, speak_on, chat_on),
+                         args=(model, console, suggestions_on, speak_on, chat_on,
+                               servo_on),
                          daemon=True),
     ]
+    if servo_on:
+        threads.append(threading.Thread(
+            target=servo_thread, args=(controller, console), daemon=True))
     if chat_on:
         threads.append(threading.Thread(
             target=brain_thread, args=(brain, console, speak_on), daemon=True))
@@ -472,6 +538,8 @@ def main():
               + (" aloud" if speak_on else "") + ". Ctrl+C to stop."
               if chat_on else
               "Yoruba live captioning. Speak freely. Ctrl+C to stop.")
+    if servo_on:
+        banner += "\nServo: say 'yà sí ọ̀tún' / 'òsì' / 'padà sí àárín' / '<n> digiri' / 'dúró'."
     print(banner + "\n")
     try:
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",

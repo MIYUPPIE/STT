@@ -45,7 +45,10 @@ services/
   brain/                 # Grok conversational brain (--chat)        — responds
   refine/                # Grok caption corrector (default)          — corrects
   tts/                   # YarnGPT Yoruba text-to-speech
+  servo/                 # Yoruba command -> ESP32-S3 servo (--servo) — actuates
   env_loader.py          # loads repo-root .env into os.environ (no dotenv dep)
+firmware/
+  esp32s3_servo/         # ESP32-S3 camera + LED + servo HTTP server (.ino)
 whisper-small-yoruba/    # base HF model        (git-ignored, see Setup)
 whisper-small-yoruba-ct2/# CTranslate2 build    (git-ignored, see Setup)
 ```
@@ -58,6 +61,7 @@ to the app through a typed contract. See:
 | `services/refine` | corrects a raw caption into accented Yoruba | Grok (xAI) | [refine/README.md](services/refine/README.md) |
 | `services/brain`  | conversational reply to each utterance | Grok (xAI) | [brain/README.md](services/brain/README.md) |
 | `services/tts`    | Yoruba text → spoken audio | YarnGPT | [tts/README.md](services/tts/README.md) |
+| `services/servo`  | Yoruba command → ESP32-S3 servo move | rules + Grok | [servo/README.md](services/servo/README.md) |
 
 ## Setup
 
@@ -124,6 +128,11 @@ python3 live_caption.py --chat --cpu
 
 # Captioning only, no Grok
 python3 live_caption.py --no-refine
+
+# Drive an ESP32-S3 servo by Yoruba voice ("yà sí ọ̀tún", "padà sí àárín",
+# "ọgọ́ta digiri", "dúró"). Flash firmware/esp32s3_servo first. Combines with any
+# mode above.
+python3 live_caption.py --servo
 ```
 
 Whisper auto-uses CUDA (`float16`) when available, else CPU (`int8`). Each cloud

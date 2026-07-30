@@ -17,12 +17,14 @@
 # from .env; only Whisper + VAD run locally (--cpu keeps the GPU free). Speaking
 # is half-duplex: the mic mutes during playback so the spoken audio isn't
 # transcribed back into a feedback loop.
+import os
 import sys
 import time
 import queue
 import argparse
 import threading
 from collections import deque
+from math import gcd
 
 import numpy as np
 import sounddevice as sd
@@ -195,12 +197,55 @@ class Console:
             sys.stdout.flush()
 
 
+# ---------------- mic capture rate + resampling ----------------
+# Silero VAD and Whisper both need 16 kHz mono. Many mics (e.g. the ALC257 analog
+# codec) refuse a 16 kHz ALSA rate, so we capture at a rate the device supports and
+# resample each block down to 16 kHz. Prefer integer-ratio rates (48k -> /3) so a
+# capture block maps to exactly WINDOW samples.
+CAPTURE_RATE = SAMPLE_RATE
+_RESAMPLER = None                  # set in main() when capture rate != 16 kHz
+
+
+def pick_capture_rate(device):
+    """First rate the input device actually accepts, preferring ones that divide
+    cleanly to 16 kHz. Falls back to the device's own default."""
+    for sr in (SAMPLE_RATE, 48000, 32000, 44100, 96000):
+        try:
+            sd.check_input_settings(device=device, samplerate=sr,
+                                    channels=1, dtype="float32")
+            return sr
+        except Exception:
+            continue
+    info = (sd.query_devices(device, "input") if device is not None
+            else sd.query_devices(kind="input"))
+    return int(info["default_samplerate"])
+
+
+def make_resampler(capture_rate):
+    """Return f(block)->exactly WINDOW float32 samples at 16 kHz."""
+    from scipy.signal import resample_poly
+    g = gcd(SAMPLE_RATE, capture_rate)
+    up, down = SAMPLE_RATE // g, capture_rate // g
+
+    def resample(x):
+        y = resample_poly(x, up, down).astype("float32")
+        if len(y) == WINDOW:
+            return y
+        if len(y) > WINDOW:
+            return y[:WINDOW].copy()
+        out = np.zeros(WINDOW, "float32")
+        out[:len(y)] = y
+        return out
+    return resample
+
+
 def audio_cb(indata, frames, t, status):
     if status:
         print(status, file=sys.stderr)
     if speaking.is_set():          # half-duplex: ignore mic while TTS plays
         return
-    raw_q.put(indata[:, 0].copy())
+    ch0 = indata[:, 0]
+    raw_q.put(ch0.copy() if _RESAMPLER is None else _RESAMPLER(ch0))
 
 
 # ---------------- stage 2: segmenter ----------------
@@ -616,9 +661,21 @@ def main():
     if robot_on:
         banner += "\nRobot: say 'síwájú' / 'sẹ́yìn' / 'òsì' / 'ọ̀tún' / 'dúró' (add 'kíákíá'/'díẹ̀díẹ̀')."
     print(banner + "\n")
+
+    # Pick a capture rate the mic accepts; resample to 16 kHz if it isn't native.
+    global CAPTURE_RATE, _RESAMPLER
+    mic = os.environ.get("MIC_DEVICE") or None
+    if mic is not None and mic.lstrip("-").isdigit():
+        mic = int(mic)
+    CAPTURE_RATE = pick_capture_rate(mic)
+    blocksize = round(WINDOW * CAPTURE_RATE / SAMPLE_RATE)
+    if CAPTURE_RATE != SAMPLE_RATE:
+        _RESAMPLER = make_resampler(CAPTURE_RATE)
+        print(f"Mic capturing at {CAPTURE_RATE} Hz, resampling to {SAMPLE_RATE} Hz.\n")
+
     try:
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                            blocksize=WINDOW, callback=audio_cb):
+        with sd.InputStream(samplerate=CAPTURE_RATE, channels=1, dtype="float32",
+                            blocksize=blocksize, device=mic, callback=audio_cb):
             while True:
                 time.sleep(0.2)
     except KeyboardInterrupt:

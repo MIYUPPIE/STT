@@ -42,6 +42,8 @@ from services.tts.contract import SynthRequest
 from services.tts.speak import play as tts_play
 from services.servo import config as servo_cfg
 from services.servo.controller import build_controller
+from services.robot import config as robot_cfg
+from services.robot.controller import build_controller as build_robot
 
 # ---------------- config ----------------
 SAMPLE_RATE = 16000
@@ -117,6 +119,7 @@ final_q = queue.Queue()
 refine_q = queue.Queue()          # finalized text awaiting LLM suggestion
 chat_q = queue.Queue()            # finalized utterance awaiting a brain reply
 servo_q = queue.Queue()           # finalized utterance awaiting a servo command
+robot_q = queue.Queue()           # finalized utterance awaiting a robot command
 tts_q = queue.Queue()             # text sentences awaiting synthesis (None = EOR)
 audio_q = queue.Queue()           # synthesized audio chunks awaiting playback
 partial_lock = threading.Lock()
@@ -253,7 +256,7 @@ def segmenter():
 
 
 # ---------------- stage 3: decoder + printer ----------------
-def decoder(model, console, suggestions_on, speak_on, chat_on, servo_on):
+def decoder(model, console, suggestions_on, speak_on, chat_on, servo_on, robot_on):
     last_ver = 0
 
     def decode(audio):
@@ -268,6 +271,8 @@ def decoder(model, console, suggestions_on, speak_on, chat_on, servo_on):
             if text:
                 if servo_on:
                     servo_q.put(text)                 # drive the servo (parallel path)
+                if robot_on:
+                    robot_q.put(text)                 # drive the robot (parallel path)
                 if chat_on:
                     chat_q.put(text)                  # brain replies -> speak async
                 elif suggestions_on:
@@ -358,6 +363,34 @@ def servo_thread(controller, console):
             print(f"[servo error] {res.error}", file=sys.stderr)
 
 
+# ---------------- stage 4d: robot controller (Yoruba command -> ESP32 over USB) -
+def robot_thread(controller, console, speak_on):
+    """Pops each finalized caption, parses it into a movement command (offline
+    rules first, Grok fallback), drives the ESP32 over the serial link, and speaks
+    a Yoruba confirmation back (the robot acts AND replies). Only reacts to real
+    commands; ordinary speech stays silent. Runs on its own thread so the serial
+    round-trip never blocks the mic, segmenter, or decode."""
+    while not stop.is_set():
+        try:
+            text = robot_q.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        try:
+            res = controller.handle(text)
+        except Exception as e:
+            print(f"[robot error] {e}", file=sys.stderr)
+            continue
+        if res.intent.action == "none":
+            continue                                 # not a command -> say nothing
+        if res.ok:
+            console.action(f"{res.intent.action} ({res.intent.source}, "
+                           f"{res.latency_ms:.0f} ms)  ⟵ {res.response}")
+        else:
+            console.action(f"{res.intent.action} FAILED: {res.error}")
+        if speak_on and res.response:
+            enqueue_speech(res.response)             # spoken Yoruba confirmation
+
+
 # ---------------- stage 5: TTS, split into synth + play so they overlap -------
 def tts_synth_worker(tts):
     """Synthesize each sentence via the YarnGPT API and forward the audio (in
@@ -427,6 +460,10 @@ def parse_args():
                     help="drive the ESP32-S3 servo from Yoruba voice commands "
                          "(e.g. 'yà sí ọ̀tún', 'padà sí àárín', 'ọgọ́ta digiri'). "
                          "Works alongside captioning/refine/chat.")
+    ap.add_argument("--robot", action="store_true",
+                    help="drive a 2-wheel robot (ESP32-S3 on USB) from Yoruba voice "
+                         "commands: 'síwájú', 'sẹ́yìn', 'òsì', 'ọ̀tún', 'dúró'. Speaks "
+                         "a Yoruba confirmation back with --speak.")
     return ap.parse_args()
 
 
@@ -510,16 +547,39 @@ def main():
     elif args.servo:
         print("Servo disabled (SERVO_ENABLED=0).")
 
+    # Robot control (ESP32-S3 on USB; this laptop is the server). --robot parses
+    # each caption into a movement command and drives the board over serial,
+    # speaking a Yoruba confirmation back. Probe the serial link once; if the board
+    # can't be opened, warn and keep going (captioning still works).
+    robot = None
+    robot_on = False
+    if args.robot and robot_cfg.ENABLED:
+        print("Opening robot link (USB serial)...", end=" ", flush=True)
+        robot = build_robot()
+        if robot.health():
+            print(f"ok on {robot.port}. Robot control on.")
+            robot_on = True
+        else:
+            print("unavailable - robot control off.")
+            print(f"  reason: {robot.last_error}")
+            print("  fix: flash firmware/esp32s3_robot, plug in USB, "
+                  "or set ROBOT_PORT in .env")
+    elif args.robot:
+        print("Robot disabled (ROBOT_ENABLED=0).")
+
     threads = [
         threading.Thread(target=segmenter, daemon=True),
         threading.Thread(target=decoder,
                          args=(model, console, suggestions_on, speak_on, chat_on,
-                               servo_on),
+                               servo_on, robot_on),
                          daemon=True),
     ]
     if servo_on:
         threads.append(threading.Thread(
             target=servo_thread, args=(controller, console), daemon=True))
+    if robot_on:
+        threads.append(threading.Thread(
+            target=robot_thread, args=(robot, console, speak_on), daemon=True))
     if chat_on:
         threads.append(threading.Thread(
             target=brain_thread, args=(brain, console, speak_on), daemon=True))
@@ -540,6 +600,8 @@ def main():
               "Yoruba live captioning. Speak freely. Ctrl+C to stop.")
     if servo_on:
         banner += "\nServo: say 'yà sí ọ̀tún' / 'òsì' / 'padà sí àárín' / '<n> digiri' / 'dúró'."
+    if robot_on:
+        banner += "\nRobot: say 'síwájú' / 'sẹ́yìn' / 'òsì' / 'ọ̀tún' / 'dúró' (add 'kíákíá'/'díẹ̀díẹ̀')."
     print(banner + "\n")
     try:
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",

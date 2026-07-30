@@ -1,0 +1,16 @@
+{"text": "máa lọ síwájú", "action": "forward", "note": "go forward (rule)"}
+{"text": "síwájú", "action": "forward", "note": "forward (rule)"}
+{"text": "tẹ̀ síwájú kíákíá", "action": "forward", "speed": "fast", "note": "forward fast (rule)"}
+{"text": "padà sẹ́yìn", "action": "backward", "note": "reverse (rule)"}
+{"text": "padà sẹ́yìn díẹ̀díẹ̀", "action": "backward", "speed": "slow", "note": "reverse slowly (rule)"}
+{"text": "yà sí òsì", "action": "left", "note": "turn left (rule)"}
+{"text": "yíjú sí ọ̀tún", "action": "right", "note": "turn right (rule)"}
+{"text": "yíjú sí ọ̀tún kíákíá", "action": "right", "speed": "fast", "note": "right fast (rule)"}
+{"text": "dúró", "action": "stop", "note": "stop (rule)"}
+{"text": "dúró jẹ́ẹ́", "action": "stop", "note": "just stop (rule)"}
+{"text": "jọ̀wọ́ má tẹ̀síwájú mọ́", "action": "stop", "note": "please stop moving (grok, negation)"}
+{"text": "gbé ara rẹ sí iwájú", "action": "forward", "note": "move yourself ahead (grok)"}
+{"text": "yípo padà", "action": "backward", "note": "turn around/back (grok)"}
+{"text": "báwo ni o ṣe wà lónìí", "action": "none", "note": "greeting, not a command"}
+{"text": "mo fẹ́ jẹun", "action": "none", "note": "i want to eat, not a command"}
+{"text": "kò sí ìṣòro", "action": "none", "note": "'no problem' must NOT read as left"}

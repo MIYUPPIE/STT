@@ -46,9 +46,11 @@ services/
   refine/                # Grok caption corrector (default)          — corrects
   tts/                   # YarnGPT Yoruba text-to-speech
   servo/                 # Yoruba command -> ESP32-S3 servo (--servo) — actuates
+  robot/                 # Yoruba command -> 2-wheel robot over USB (--robot)
   env_loader.py          # loads repo-root .env into os.environ (no dotenv dep)
 firmware/
   esp32s3_servo/         # ESP32-S3 camera + LED + servo HTTP server (.ino)
+  esp32s3_robot/         # ESP32-S3 USB-serial H-bridge motor controller (.ino)
 whisper-small-yoruba/    # base HF model        (git-ignored, see Setup)
 whisper-small-yoruba-ct2/# CTranslate2 build    (git-ignored, see Setup)
 ```
@@ -62,6 +64,7 @@ to the app through a typed contract. See:
 | `services/brain`  | conversational reply to each utterance | Grok (xAI) | [brain/README.md](services/brain/README.md) |
 | `services/tts`    | Yoruba text → spoken audio | YarnGPT | [tts/README.md](services/tts/README.md) |
 | `services/servo`  | Yoruba command → ESP32-S3 servo move | rules + Grok | [servo/README.md](services/servo/README.md) |
+| `services/robot`  | Yoruba command → 2-wheel robot over USB | rules + Grok | [robot/README.md](services/robot/README.md) |
 
 ## Setup
 
@@ -77,6 +80,8 @@ sudo apt-get install -y portaudio19-dev          # Debian/Ubuntu
 pip install numpy sounddevice torch faster-whisper ctranslate2 \
             transformers huggingface_hub
 ```
+
+(`pyserial` is also needed for `--robot` — the USB link to the ESP32 robot.)
 
 (`transformers`/`huggingface_hub` are only needed for `benchmark.py` and
 `download.py`. The app and TTS need no `soundfile` — WAV is decoded with the
@@ -133,6 +138,10 @@ python3 live_caption.py --no-refine
 # "ọgọ́ta digiri", "dúró"). Flash firmware/esp32s3_servo first. Combines with any
 # mode above.
 python3 live_caption.py --servo
+
+# Drive a 2-wheel robot (ESP32-S3 on USB) by Yoruba voice, with a spoken Yoruba
+# reply. Flash firmware/esp32s3_robot first. Say "síwájú"/"sẹ́yìn"/"òsì"/"ọ̀tún"/"dúró".
+python3 live_caption.py --robot --speak
 ```
 
 Whisper auto-uses CUDA (`float16`) when available, else CPU (`int8`). Each cloud

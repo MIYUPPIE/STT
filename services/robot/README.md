@@ -75,8 +75,16 @@ python3 -m services.robot.controller "dúró"
 ## Board (`firmware/esp32s3_robot/`)
 
 Flash `firmware/esp32s3_robot/esp32s3_robot.ino` (Arduino IDE, "ESP32S3 Dev
-Module", **USB CDC On Boot: Enabled** so Serial is the native USB port). It reads
-newline commands and drives the H-bridge:
+Module"). **Match "USB CDC On Boot" to the port your cable is in:**
+
+- Cable in the **UART/COM port** (a CH340/CH343/CP210x bridge — `/dev/ttyACM0`
+  with USB VID `1A86` or `10C4`): set **USB CDC On Boot: Disabled** so `Serial`
+  is UART0, which the bridge is wired to. This is the common case.
+- Cable in the S3's **native USB port**: set **USB CDC On Boot: Enabled**.
+
+If `--health` opens the port but gets "no ack from board", this setting is the
+mismatch (Serial is talking to the other USB port). It reads newline commands and
+drives the H-bridge:
 
 ```
 IN1 -> GPIO 4   IN2 -> GPIO 5   : left  motor    ENA/ENB jumpered HIGH

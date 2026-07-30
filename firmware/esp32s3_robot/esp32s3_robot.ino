@@ -10,8 +10,14 @@
 //   ENA/ENB jumpered HIGH (speed comes from PWM on the IN pins).
 //   Motor supply to the driver's V+, GND common with the ESP32.
 //
-// Board setting: Arduino IDE -> "USB CDC On Boot: Enabled" so Serial is the native
-// USB port (/dev/ttyACM0). Baud 115200.
+// Board setting (which USB port is your cable in?) -> Arduino IDE, Tools:
+//   * UART / COM port (a CH340/CH343/CP210x bridge, VID 1A86 or 10C4)  -> the
+//     common case  ->  set "USB CDC On Boot: DISABLED" so Serial = UART0, which
+//     is what that bridge is wired to.
+//   * Native "USB" port of the S3 itself                              -> set
+//     "USB CDC On Boot: Enabled" so Serial = the native USB CDC.
+// If Serial says nothing on the port you opened, this setting is the mismatch.
+// Baud 115200.
 //
 // Protocol (newline-terminated, case-insensitive):
 //   F[,speed[,ms]]   forward         L[,speed[,ms]]   spin left

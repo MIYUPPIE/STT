@@ -91,7 +91,11 @@ IN1 -> GPIO 4   IN2 -> GPIO 5   : left  motor    ENA/ENB jumpered HIGH
 IN3 -> GPIO 6   IN4 -> GPIO 7   : right motor     motor V+ to driver, GND common
 ```
 
-Speed is PWM on the IN pins (20 kHz). Turns spin in place (one wheel each way).
+Speed is PWM on the IN pins. **On an L298N the ENA/ENB jumpers must be ON** (or
+the enable pins tied HIGH) or the outputs stay dead — the board will ACK commands
+but nothing moves. Keep input PWM at ~1 kHz for the L298N's slow transistors
+(`PWM_FREQ`); a MOSFET driver (TB6612/DRV8833) can go to 20 kHz. Turns spin in
+place (one wheel each way).
 
 ## Config (`config.py`, all env-overridable)
 

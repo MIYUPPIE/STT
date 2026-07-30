@@ -42,7 +42,10 @@
 #define DEF_MS        900
 #define MAX_MS        5000
 #define WATCHDOG_MS   2000
-#define PWM_FREQ      20000   // 20 kHz -> above hearing, no motor whine
+// L298N is a slow bipolar driver: PWM on its INPUT pins must stay low (~1 kHz).
+// 20 kHz makes it weak/unresponsive. A faint 1 kHz hum at part speed is normal.
+// (For a MOSFET driver like TB6612/DRV8833 you can raise this to 20000.)
+#define PWM_FREQ      1000
 #define PWM_RES       8       // 0..255
 
 unsigned long moveUntil = 0;     // 0 = stopped; else millis() deadline

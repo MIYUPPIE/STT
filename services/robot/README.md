@@ -68,9 +68,15 @@ the pipeline keeps captioning.
 
 ```bash
 python3 -m services.robot.controller --health
-python3 -m services.robot.controller "yà sí òsì"
+python3 -m services.robot.controller "yà sí òsì"          # one nudge, auto-stops
 python3 -m services.robot.controller "dúró"
+python3 -m services.robot.controller --hold "máa lọ síwájú"   # continuous, Ctrl+C stops
 ```
+
+`--hold` drives continuously in the command's direction, resending a keepalive
+every `ROBOT_HOLD_REFRESH` s until you press Ctrl+C, which always stops the robot.
+If the process is killed instead, the firmware watchdog halts the motors within
+~2 s. No reflash needed — it works with the timed-nudge firmware.
 
 ## Board (`firmware/esp32s3_robot/`)
 

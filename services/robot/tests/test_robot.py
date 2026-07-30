@@ -42,6 +42,29 @@ class RaisingSerial:
         raise OSError("device disconnected")
 
 
+class HoldSerial:
+    """Records sends; raises KeyboardInterrupt after `raise_after` move frames to
+    simulate the user pressing Ctrl+C. The final 'S' (sent from hold's finally)
+    still goes through."""
+    port = "fake"
+
+    def __init__(self, raise_after=3):
+        self.sent = []
+        self.raise_after = raise_after
+        self.moves = 0
+
+    def send(self, line):
+        self.sent.append(line)
+        if line != "S":
+            self.moves += 1
+            if self.moves >= self.raise_after:
+                raise KeyboardInterrupt
+        return "OK"
+
+    def close(self):
+        pass
+
+
 # ================== normalization ==================
 class TestNormalize(unittest.TestCase):
     def test_strips_tone(self):
@@ -245,6 +268,51 @@ class TestController(unittest.TestCase):
         ctrl = RobotController(build_parser_no_grok(), None, open_error="boom")
         self.assertFalse(ctrl.health())
         self.assertEqual(ctrl.last_error, "boom")
+
+
+class TestHold(unittest.TestCase):
+    def ctrl(self, serial):
+        return RobotController(build_parser_no_grok(), RobotLink(serial))
+
+    def test_hold_resends_then_always_stops(self):
+        old = config.HOLD_REFRESH
+        config.HOLD_REFRESH = 0.0                     # don't sleep during the test
+        try:
+            s = HoldSerial(raise_after=3)
+            status = self.ctrl(s).hold("máa lọ síwájú")
+        finally:
+            config.HOLD_REFRESH = old
+        move = f"F,{config.DEFAULT_SPEED},{config.HOLD_MS}"
+        self.assertEqual(s.sent.count(move), 3)       # kept resending the frame
+        self.assertTrue(all(x == move for x in s.sent[:-1]))
+        self.assertEqual(s.sent[-1], "S")             # Ctrl+C still stops the robot
+        self.assertIn("Ctrl+C", status)
+
+    def test_hold_stop_word(self):
+        s = FakeSerial(ack="OK:S")
+        self.assertEqual(self.ctrl(s).hold("dúró"), "stopped")
+        self.assertEqual(s.sent, ["S"])
+
+    def test_hold_non_command_never_drives(self):
+        s = FakeSerial(ack="OK")
+        self.assertEqual(self.ctrl(s).hold("báwo ni o ṣe wà"),
+                         "not a movement command")
+        self.assertEqual(len(s.sent), 0)
+
+    def test_hold_board_not_open(self):
+        ctrl = RobotController(build_parser_no_grok(), None, open_error="no port")
+        self.assertIn("no port", ctrl.hold("síwájú"))
+
+    def test_hold_board_error_stops(self):
+        old = config.HOLD_REFRESH
+        config.HOLD_REFRESH = 0.0
+        try:
+            s = FakeSerial(ack="ERR:unknown")         # board rejects the frame
+            status = self.ctrl(s).hold("síwájú")
+        finally:
+            config.HOLD_REFRESH = old
+        self.assertIn("board error", status)
+        self.assertEqual(s.sent[-1], "S")             # still halts on the way out
 
 
 def build_parser_no_grok():

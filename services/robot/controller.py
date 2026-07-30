@@ -8,7 +8,7 @@ import sys
 import time
 
 from . import config, responses
-from .contract import MoveResult, NONE, STOP, LEFT, RIGHT
+from .contract import MoveResult, NONE, STOP, LEFT, RIGHT, WIRE
 from .intent import build_parser, IntentParser
 from .link import RobotLink, open_serial
 from .responses import response_for
@@ -46,6 +46,36 @@ class RobotController:
                               latency_ms=dt)
         return MoveResult(intent, moved=False, ok=False, ack=ack,
                           response=responses.FAILED, error=err, latency_ms=dt)
+
+    def hold(self, text: str, on_tick=None) -> str:
+        """Continuous drive: keep moving in the command's direction until
+        interrupted (KeyboardInterrupt / Ctrl+C), then always stop. Returns a
+        short status string. Resends a HOLD_MS move every HOLD_REFRESH seconds so
+        the board's move-window never lapses; the firmware watchdog still halts the
+        motors within ~2 s if this process dies without sending stop."""
+        intent = self.parser.parse(text)
+        if intent.action == NONE:
+            return "not a movement command"
+        if self.link is None:
+            return f"board not open: {self.open_error}"
+        if intent.action == STOP:
+            self.link.move(STOP, 0, 0)
+            return "stopped"
+
+        speed = config.DEFAULT_SPEED if intent.speed is None else intent.speed
+        line = f"{WIRE[intent.action]},{speed},{config.HOLD_MS}"
+        try:
+            while True:
+                ok, ack, err = self.link.command(line)
+                if on_tick:
+                    on_tick(ok, ack, err)
+                if not ok:
+                    return f"board error: {err}"
+                time.sleep(config.HOLD_REFRESH)
+        except KeyboardInterrupt:
+            return "stopped (Ctrl+C)"
+        finally:
+            self.link.move(STOP, 0, 0)      # always halt on the way out
 
     def health(self) -> bool:
         if self.link is None:
@@ -100,9 +130,25 @@ def _main(argv):
     if not text:
         print('usage: python -m services.robot.controller "yoruba command"',
               file=sys.stderr)
+        print('       python -m services.robot.controller --hold "yoruba command"',
+              file=sys.stderr)
         print("       python -m services.robot.controller --health",
               file=sys.stderr)
         return 2
+    if "--hold" in argv:
+        intent = ctrl.parser.parse(text)
+        print(f"[{intent.action}] continuous drive on {ctrl.port} — Ctrl+C to stop")
+        ticks = {"n": 0}
+
+        def tick(ok, ack, err):
+            ticks["n"] += 1
+            sys.stdout.write(f"\r  driving... {ticks['n']} frames  last ack={ack!r}   ")
+            sys.stdout.flush()
+
+        status = ctrl.hold(text, on_tick=tick)
+        print(f"\n{status}")
+        ctrl.close()
+        return 0
     res = ctrl.handle(text)
     tag = "moved" if res.moved else ("no-op" if res.ok else f"FAILED: {res.error}")
     print(f"[{res.intent.action}/{res.intent.source}] {tag}  ack={res.ack!r}  "

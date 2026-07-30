@@ -43,12 +43,12 @@ unsigned long moveUntil = 0;     // 0 = stopped; else millis() deadline
 unsigned long lastByte  = 0;     // last time any serial byte arrived
 String line;
 
-// analogWrite both pins of one motor. speed in -255..255 (sign = direction).
+// PWM both pins of one motor via LEDC. speed in -255..255 (sign = direction).
 void driveMotor(int inA, int inB, int speed) {
   if (speed > 255) speed = 255;
   if (speed < -255) speed = -255;
-  if (speed >= 0) { analogWrite(inA, speed);  analogWrite(inB, 0); }
-  else            { analogWrite(inA, 0);       analogWrite(inB, -speed); }
+  if (speed >= 0) { ledcWrite(inA, speed);  ledcWrite(inB, 0); }
+  else            { ledcWrite(inA, 0);       ledcWrite(inB, -speed); }
 }
 
 void motors(int left, int right) {
@@ -106,12 +106,10 @@ void handle(String s) {
 
 void setup() {
   Serial.begin(115200);
-  analogWriteResolution(PWM_RES);
   int pins[] = {IN1, IN2, IN3, IN4};
   for (int p : pins) {
-    pinMode(p, OUTPUT);
-    analogWriteFrequency(p, PWM_FREQ);
-    analogWrite(p, 0);
+    ledcAttach(p, PWM_FREQ, PWM_RES);   // core 3.x: allocates an LEDC channel
+    ledcWrite(p, 0);
   }
   stopMotors();
   lastByte = millis();

@@ -128,6 +128,9 @@ partial_lock = threading.Lock()
 partial = {"audio": None, "ver": 0}
 stop = threading.Event()
 speaking = threading.Event()      # set while TTS plays -> mic frames are dropped
+busy = threading.Event()          # set for a whole command turn (recognize->move->
+                                  # reply) so the mic ignores speech until it's done
+command_mode = threading.Event()  # set when --robot/--servo: enables turn-based mic
 
 
 # ---------------- speech queueing (sentence pipeline) ----------------
@@ -242,7 +245,9 @@ def make_resampler(capture_rate):
 def audio_cb(indata, frames, t, status):
     if status:
         print(status, file=sys.stderr)
-    if speaking.is_set():          # half-duplex: ignore mic while TTS plays
+    # Deaf while TTS plays (half-duplex) AND for the whole command turn (busy), so
+    # a new utterance can't step on the command still being processed/spoken.
+    if speaking.is_set() or busy.is_set():
         return
     ch0 = indata[:, 0]
     raw_q.put(ch0.copy() if _RESAMPLER is None else _RESAMPLER(ch0))
@@ -266,6 +271,8 @@ def segmenter():
         with partial_lock:
             partial["audio"] = None       # invalidate stale partial
         if len(seg) >= min_speech:
+            if command_mode.is_set():
+                busy.set()                # turn starts: go deaf until it's handled
             final_q.put(seg)
         else:
             final_q.put(None)             # too short -> just clear the partial line
@@ -317,13 +324,17 @@ def decoder(model, console, suggestions_on, speak_on, chat_on, servo_on, robot_o
                 if servo_on:
                     servo_q.put(text)                 # drive the servo (parallel path)
                 if robot_on:
-                    robot_q.put(text)                 # drive the robot (parallel path)
-                if chat_on:
+                    robot_q.put(text)                 # robot owns the turn: caption
+                                                      # refine/TTS stay quiet so only
+                                                      # the robot's reply is spoken
+                elif chat_on:
                     chat_q.put(text)                  # brain replies -> speak async
                 elif suggestions_on:
                     refine_q.put(text)                # refine -> (speak) async
                 elif speak_on:
                     enqueue_speech(text)              # no refiner: speak raw
+            elif command_mode.is_set():
+                busy.clear()                          # empty decode -> end the turn now
             last_ver = partial["ver"]
             continue
         except queue.Empty:
@@ -426,14 +437,17 @@ def robot_thread(controller, console, speak_on):
             print(f"[robot error] {e}", file=sys.stderr)
             continue
         if res.intent.action == "none":
-            continue                                 # not a command -> say nothing
+            busy.clear()                             # not a command -> end the turn
+            continue                                 # (and stay silent)
         if res.ok:
             console.action(f"{res.intent.action} ({res.intent.source}, "
                            f"{res.latency_ms:.0f} ms)  ⟵ {res.response}")
         else:
             console.action(f"{res.intent.action} FAILED: {res.error}")
         if speak_on and res.response:
-            enqueue_speech(res.response)             # spoken Yoruba confirmation
+            enqueue_speech(res.response)             # TTS end-of-response ends the turn
+        else:
+            busy.clear()                             # no spoken reply -> end the turn now
 
 
 # ---------------- stage 5: TTS, split into synth + play so they overlap -------
@@ -472,7 +486,8 @@ def tts_play_worker():
                     raw_q.queue.clear()
                 speaking.clear()
                 playing = False
-            continue
+            busy.clear()                             # end the command turn: mic listens
+            continue                                 # again (even if synth made no audio)
         audio, sr = item
         if not playing:                              # first chunk -> mute the mic
             speaking.set()
@@ -661,6 +676,11 @@ def main():
     if robot_on:
         banner += "\nRobot: say 'síwájú' / 'sẹ́yìn' / 'òsì' / 'ọ̀tún' / 'dúró' (add 'kíákíá'/'díẹ̀díẹ̀')."
     print(banner + "\n")
+
+    if robot_on:
+        command_mode.set()            # turn-based mic: each command is fully handled
+                                      # (recognized -> moved -> reply spoken) before
+                                      # the mic listens for the next one
 
     # Pick a capture rate the mic accepts; resample to 16 kHz if it isn't native.
     global CAPTURE_RATE, _RESAMPLER

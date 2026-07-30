@@ -30,6 +30,12 @@ SLOW_SPEED = int(os.environ.get("ROBOT_SLOW_SPEED", "130"))
 DRIVE_MS = int(os.environ.get("ROBOT_DRIVE_MS", "900"))
 TURN_MS = int(os.environ.get("ROBOT_TURN_MS", "550"))
 
+# Continuous ("hold") drive: keep the motor alive by resending the move every
+# HOLD_REFRESH seconds, each frame asking the board for HOLD_MS of motion. Refresh
+# must be < HOLD_MS and < the firmware watchdog (2 s) so there is never a gap.
+HOLD_MS = int(os.environ.get("ROBOT_HOLD_MS", "1000"))
+HOLD_REFRESH = float(os.environ.get("ROBOT_HOLD_REFRESH", "0.4"))
+
 # ---- Grok fallback (optional) ----
 GROK_FALLBACK = os.environ.get("ROBOT_GROK_FALLBACK", "1") != "0"
 API_URL = os.environ.get("XAI_API_URL", "https://api.x.ai/v1/chat/completions")

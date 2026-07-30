@@ -473,10 +473,23 @@ def main():
     device = "cuda" if use_gpu else "cpu"
     compute = "float16" if use_gpu else "int8"
 
+    def load_whisper(dev, comp):
+        m = WhisperModel("./whisper-small-yoruba-ct2", device=dev, compute_type=comp)
+        list(m.transcribe(np.zeros(SAMPLE_RATE, "float32"), **DECODE_OPTS)[0])  # warmup
+        return m
+
     print(f"Loading whisper on {device} ({compute})...")
-    model = WhisperModel("./whisper-small-yoruba-ct2", device=device,
-                         compute_type=compute)
-    list(model.transcribe(np.zeros(SAMPLE_RATE, "float32"), **DECODE_OPTS)[0])  # warmup
+    try:
+        model = load_whisper(device, compute)
+    except Exception as e:
+        if device != "cuda":
+            raise
+        # GPU present but its CUDA libs (e.g. libcublas) aren't loadable -> don't
+        # crash; fall back to CPU. Grok + TTS are cloud, so CPU is fine for control.
+        print(f"  GPU load failed: {e.__class__.__name__}: {e}")
+        print("  Falling back to CPU (int8). Pass --cpu to skip the GPU attempt.")
+        device, compute = "cpu", "int8"
+        model = load_whisper(device, compute)
 
     console = Console()
 

@@ -114,6 +114,25 @@ class TestRule(unittest.TestCase):
         self.assertEqual(self.act("ó tún"), RIGHT)          # ọ̀tún split
         self.assertEqual(self.act("dú ró"), STOP)           # dúró split
 
+    def test_fuzzy_autocorrect_mishearings(self):
+        # real Whisper mishearings from live sessions must autocorrect
+        for phrase, want in [
+            ("wájìn", FORWARD), ("síwà jún", FORWARD), ("síwád yìn", FORWARD),
+            ("dulo", STOP), ("ko tun", RIGHT), ("ó sí", LEFT),
+        ]:
+            self.assertEqual(self.act(phrase), want, phrase)
+
+    def test_fuzzy_does_not_overmatch(self):
+        # ordinary speech / greetings must not fuzzy-match a command
+        for phrase in ["báwo ni o ṣe wà", "ṣé o wà", "e kú àárọ̀", "mo fẹ́ jẹun",
+                       "ó ń sáré títí"]:
+            self.assertEqual(self.act(phrase), NONE, phrase)
+
+    def test_negation_routes_away(self):
+        # "má ..." negation must not drive forward; goes to Grok (-> stop)
+        self.assertEqual(self.act("má lọ síwájú"), NONE)
+        self.assertEqual(self.act("jọ̀wọ́ má tẹ̀síwájú mọ́"), NONE)
+
     def test_non_command_none(self):
         self.assertEqual(self.act("báwo ni o ṣe wà"), NONE)
         # negation guard keeps "kò sí" (there isn't) from despacing into a left turn

@@ -225,32 +225,29 @@ def pick_capture_rate(device):
 
 
 def make_resampler(capture_rate):
-    """Return f(block)->exactly WINDOW float32 samples at 16 kHz."""
+    """Return f(block)->block resampled to 16 kHz (length scales by the ratio).
+    The segmenter buffers and slices into WINDOW-sized pieces."""
     from scipy.signal import resample_poly
     g = gcd(SAMPLE_RATE, capture_rate)
     up, down = SAMPLE_RATE // g, capture_rate // g
 
     def resample(x):
-        y = resample_poly(x, up, down).astype("float32")
-        if len(y) == WINDOW:
-            return y
-        if len(y) > WINDOW:
-            return y[:WINDOW].copy()
-        out = np.zeros(WINDOW, "float32")
-        out[:len(y)] = y
-        return out
+        return resample_poly(x, up, down).astype("float32")
     return resample
 
 
 def audio_cb(indata, frames, t, status):
-    if status:
+    # input_overflow is non-fatal and would spam every callback under CPU load;
+    # surface anything else.
+    if status and not status.input_overflow:
         print(status, file=sys.stderr)
     # Deaf while TTS plays (half-duplex) AND for the whole command turn (busy), so
     # a new utterance can't step on the command still being processed/spoken.
     if speaking.is_set() or busy.is_set():
         return
-    ch0 = indata[:, 0]
-    raw_q.put(ch0.copy() if _RESAMPLER is None else _RESAMPLER(ch0))
+    # Keep the realtime callback trivial: just hand off the raw block. Resampling
+    # to 16 kHz happens in the segmenter thread so heavy DSP never stalls capture.
+    raw_q.put(indata[:, 0].copy())
 
 
 # ---------------- stage 2: segmenter ----------------
@@ -277,14 +274,10 @@ def segmenter():
         else:
             final_q.put(None)             # too short -> just clear the partial line
 
-    while not stop.is_set():
-        try:
-            win = raw_q.get(timeout=0.1)
-        except queue.Empty:
-            continue
+    def process_window(win):              # win: 512 samples @ 16 kHz
+        nonlocal collecting, frames, since_partial
         ring.append(win)
         ev = vad(win)
-
         if ev == "start":
             collecting = True
             frames = list(ring)           # include pre-roll
@@ -301,10 +294,25 @@ def segmenter():
                     partial["audio"] = np.concatenate(frames)
                     partial["ver"] += 1
                 since_partial = 0
-
         if ev == "end" and collecting:
             collecting = False
             flush_final()
+
+    # Capture arrives in large blocks (for overflow headroom); resample the block
+    # to 16 kHz, buffer it, and feed the VAD exactly WINDOW-sized windows. The
+    # buffer absorbs rates whose resample doesn't land on a WINDOW multiple.
+    buf = np.empty(0, "float32")
+    while not stop.is_set():
+        try:
+            block = raw_q.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if _RESAMPLER is not None:
+            block = _RESAMPLER(block)
+        buf = block if buf.size == 0 else np.concatenate([buf, block])
+        while len(buf) >= WINDOW:
+            process_window(buf[:WINDOW])
+            buf = buf[WINDOW:]
 
 
 # ---------------- stage 3: decoder + printer ----------------
@@ -688,14 +696,18 @@ def main():
     if mic is not None and mic.lstrip("-").isdigit():
         mic = int(mic)
     CAPTURE_RATE = pick_capture_rate(mic)
-    blocksize = round(WINDOW * CAPTURE_RATE / SAMPLE_RATE)
+    # Capture several VAD windows per callback (big block) + a deep buffer so a
+    # CPU spike (e.g. Whisper decoding) can't overflow the mic and drop audio.
+    BLOCK_WINDOWS = 8                            # ~256 ms per callback
+    blocksize = round(WINDOW * CAPTURE_RATE / SAMPLE_RATE) * BLOCK_WINDOWS
     if CAPTURE_RATE != SAMPLE_RATE:
         _RESAMPLER = make_resampler(CAPTURE_RATE)
         print(f"Mic capturing at {CAPTURE_RATE} Hz, resampling to {SAMPLE_RATE} Hz.\n")
 
     try:
         with sd.InputStream(samplerate=CAPTURE_RATE, channels=1, dtype="float32",
-                            blocksize=blocksize, device=mic, callback=audio_cb):
+                            blocksize=blocksize, device=mic, latency=0.4,
+                            callback=audio_cb):
             while True:
                 time.sleep(0.2)
     except KeyboardInterrupt:

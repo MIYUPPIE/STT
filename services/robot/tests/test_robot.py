@@ -104,9 +104,16 @@ class TestRule(unittest.TestCase):
         self.assertEqual(rule_intent("lọ síwájú díẹ̀díẹ̀").speed, config.SLOW_SPEED)
         self.assertIsNone(rule_intent("lọ síwájú").speed)
 
+    def test_split_word_transcriptions(self):
+        # Whisper commonly splits the word; the despaced match must still catch it
+        self.assertEqual(self.act("sí wá jù"), FORWARD)     # síwájú split
+        self.assertEqual(self.act("sí wa jù"), FORWARD)
+        self.assertEqual(self.act("sẹ́ yìn"), BACKWARD)      # sẹ́yìn split
+
     def test_non_command_none(self):
         self.assertEqual(self.act("báwo ni o ṣe wà"), NONE)
         self.assertEqual(self.act("kò sí ìṣòro"), NONE)   # 'kosi' must not hit 'osi'
+        self.assertEqual(self.act("ó ń sáré títí"), NONE) # despace must not misfire
         self.assertEqual(self.act(""), NONE)
 
 

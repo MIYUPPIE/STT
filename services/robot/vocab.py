@@ -61,17 +61,16 @@ def rule_intent(text: str) -> Intent:
     if not norm:
         return Intent(NONE, None, "none", text)
     tokens = set(norm.split())
-    # Whisper often splits a word: "síwájú" -> "sí wá jù", "sẹ́yìn" -> "sẹ́ yìn".
-    # Match the long, distinctive commands on the space-removed string too so those
-    # splits still register. (Left/right/stop stay token-only: too short to despace
-    # safely, e.g. "kò sí" must not become a left turn.)
+    # Whisper routinely splits a command word: "síwájú" -> "sí wá jù", "òsì" ->
+    # "ó sí", "dúró" -> "dú ró". So match on the space-removed string too, not just
+    # whole tokens, and let the negation guard below stop "kò sí" from turning left.
     joined = norm.replace(" ", "")
 
-    if _has(tokens, STOP_WORDS):
+    if _has(tokens, STOP_WORDS) or "duro" in joined:
         return Intent(STOP, None, "rule", text)
     # Negation ("má ...", "kò ...", "kì í ...") flips the meaning ("don't go
-    # forward" = stop). The rule layer can't reason about that, so hand negated
-    # utterances to Grok instead of matching the movement word literally. Note
+    # forward" = stop) and "kò sí" (there isn't) must not read as a left turn. The
+    # rule layer can't reason about that, so hand negated utterances to Grok. Note
     # "máa" (habitual "keep") normalizes to "maa", not "ma", so it isn't caught.
     if tokens & {"ma", "ko", "kii"}:
         return Intent(NONE, None, "none", text)
@@ -80,8 +79,8 @@ def rule_intent(text: str) -> Intent:
         return Intent(FORWARD, speed, "rule", text)
     if _has(tokens, BACKWARD_WORDS) or "seyin" in joined or "sehin" in joined:
         return Intent(BACKWARD, speed, "rule", text)
-    if _has(tokens, LEFT_WORDS):
+    if _has(tokens, LEFT_WORDS) or "osi" in joined:
         return Intent(LEFT, speed, "rule", text)
-    if _has(tokens, RIGHT_WORDS):
+    if _has(tokens, RIGHT_WORDS) or "otun" in joined:
         return Intent(RIGHT, speed, "rule", text)
     return Intent(NONE, None, "none", text)

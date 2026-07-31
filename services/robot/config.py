@@ -25,6 +25,10 @@ ENABLED = os.environ.get("ROBOT_ENABLED", "1") != "0"
 DEFAULT_SPEED = int(os.environ.get("ROBOT_SPEED", "200"))     # 0-255
 FAST_SPEED = int(os.environ.get("ROBOT_FAST_SPEED", "255"))
 SLOW_SPEED = int(os.environ.get("ROBOT_SLOW_SPEED", "130"))
+
+# Fuzzy command match threshold (0-1). Lower = more tolerant of Whisper noise but
+# more false matches. Tuned against real mishearings; override if needed.
+MATCH_THRESHOLD = float(os.environ.get("ROBOT_MATCH_THRESHOLD", "0.72"))
 # How long a single nudge runs before the board auto-stops (ms). Turns are
 # shorter than straight moves so one command yields a sensible angle.
 DRIVE_MS = int(os.environ.get("ROBOT_DRIVE_MS", "900"))

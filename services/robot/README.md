@@ -78,6 +78,13 @@ every `ROBOT_HOLD_REFRESH` s until you press Ctrl+C, which always stops the robo
 If the process is killed instead, the firmware watchdog halts the motors within
 ~2 s. No reflash needed — it works with the timed-nudge firmware.
 
+**Continuous voice control** (`live_caption.py --robot`) uses the same mechanism:
+a direction command **latches** (`controller.drive(action, speed)`) so the robot
+keeps moving until another command or `dúró` (`controller.halt()`). A keepalive
+thread (`start_keepalive`) resends the current move. The spoken confirmations are
+pre-synthesized once at startup and replayed from cache, so each reply is instant
+instead of a per-command cloud call.
+
 ## Board (`firmware/esp32s3_robot/`)
 
 Flash `firmware/esp32s3_robot/esp32s3_robot.ino` (Arduino IDE, "ESP32S3 Dev

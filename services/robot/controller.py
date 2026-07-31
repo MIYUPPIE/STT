@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 import time
+import threading
 
 from . import config, responses
 from .contract import MoveResult, NONE, STOP, LEFT, RIGHT, WIRE
@@ -20,9 +21,46 @@ class RobotController:
         self.parser = parser
         self.link = link
         self.open_error = open_error
+        # continuous-drive state (used by live_caption); serial access serialized
+        self._lock = threading.Lock()
+        self._target = None            # (action, speed) while driving; None = stopped
+        self._ka_stop = threading.Event()
+        self._ka = None
 
     def _ms_for(self, action: str) -> int:
         return config.TURN_MS if action in (LEFT, RIGHT) else config.DRIVE_MS
+
+    # ---------------- continuous drive ----------------
+    # drive(action) latches motion: the robot keeps moving in that direction until
+    # drive() is called with another direction or halt() stops it. A keepalive
+    # thread resends the current move every HOLD_REFRESH so the board's move-window
+    # never lapses; if this process dies, the firmware watchdog halts within ~2 s.
+    def drive(self, action: str, speed: int):
+        with self._lock:
+            self._target = (action, speed)
+            return self.link.move(action, speed, config.HOLD_MS)
+
+    def halt(self):
+        with self._lock:
+            self._target = None
+            return self.link.move(STOP, 0, 0)
+
+    def start_keepalive(self):
+        if self._ka is not None or self.link is None:
+            return
+
+        def loop():
+            while not self._ka_stop.is_set():
+                with self._lock:
+                    if self._target is not None:
+                        self.link.move(self._target[0], self._target[1],
+                                       config.HOLD_MS)
+                self._ka_stop.wait(config.HOLD_REFRESH)
+        self._ka = threading.Thread(target=loop, daemon=True)
+        self._ka.start()
+
+    def stop_keepalive(self):
+        self._ka_stop.set()
 
     def handle(self, text: str) -> MoveResult:
         intent = self.parser.parse(text)

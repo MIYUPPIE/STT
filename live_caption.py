@@ -46,6 +46,7 @@ from services.servo import config as servo_cfg
 from services.servo.controller import build_controller
 from services.robot import config as robot_cfg
 from services.robot.controller import build_controller as build_robot
+from services.robot.responses import RESPONSES, response_for
 
 # ---------------- config ----------------
 SAMPLE_RATE = 16000
@@ -144,6 +145,14 @@ def enqueue_speech(text):
     for chunk in chunks:
         tts_q.put(chunk)
     tts_q.put(None)
+
+
+def enqueue_audio(audio, sr):
+    """Play a pre-synthesized clip directly, bypassing YarnGPT synth, so fixed
+    replies (robot confirmations) are instant. Trailing None ends the response and
+    reopens the mic, exactly like enqueue_speech."""
+    audio_q.put((audio, sr))
+    audio_q.put(None)
 
 
 # ---------------- console (single writer for all threads) ----------------
@@ -428,34 +437,43 @@ def servo_thread(controller, console):
 
 
 # ---------------- stage 4d: robot controller (Yoruba command -> ESP32 over USB) -
-def robot_thread(controller, console, speak_on):
-    """Pops each finalized caption, parses it into a movement command (offline
-    rules first, Grok fallback), drives the ESP32 over the serial link, and speaks
-    a Yoruba confirmation back (the robot acts AND replies). Only reacts to real
-    commands; ordinary speech stays silent. Runs on its own thread so the serial
-    round-trip never blocks the mic, segmenter, or decode."""
+def robot_thread(controller, console, speak_on, robot_audio):
+    """Continuous voice control: a direction command latches motion (the robot keeps
+    moving until another command or 'dúró'); the confirmation is a pre-cached clip
+    played instantly (no per-command cloud synth), so the loop stays snappy. Only
+    reacts to real commands; ordinary speech stays silent."""
     while not stop.is_set():
         try:
             text = robot_q.get(timeout=0.1)
         except queue.Empty:
             continue
+        intent = controller.parser.parse(text)       # rules first, Grok fallback
+        action = intent.action
+        if action == "none":
+            busy.clear()                             # not a command -> end the turn
+            continue
         try:
-            res = controller.handle(text)
+            if action == "stop":
+                ok, ack, err = controller.halt()
+            else:
+                speed = (robot_cfg.DEFAULT_SPEED if intent.speed is None
+                         else intent.speed)
+                ok, ack, err = controller.drive(action, speed)  # latched, continuous
         except Exception as e:
             print(f"[robot error] {e}", file=sys.stderr)
+            busy.clear()
             continue
-        if res.intent.action == "none":
-            busy.clear()                             # not a command -> end the turn
-            continue                                 # (and stay silent)
-        if res.ok:
-            console.action(f"{res.intent.action} ({res.intent.source}, "
-                           f"{res.latency_ms:.0f} ms)  ⟵ {res.response}")
+        if ok:
+            console.action(f"{action} ({intent.source})  ⟵ {response_for(action)}")
         else:
-            console.action(f"{res.intent.action} FAILED: {res.error}")
-        if speak_on and res.response:
-            enqueue_speech(res.response)             # TTS end-of-response ends the turn
+            console.action(f"{action} FAILED: {err}")
+            busy.clear()
+            continue
+        clip = robot_audio.get(action) if speak_on else None
+        if clip is not None:
+            enqueue_audio(*clip)                     # instant cached confirmation
         else:
-            busy.clear()                             # no spoken reply -> end the turn now
+            busy.clear()                             # no clip -> end the turn now
 
 
 # ---------------- stage 5: TTS, split into synth + play so they overlap -------
@@ -648,6 +666,20 @@ def main():
     elif args.robot:
         print("Robot disabled (ROBOT_ENABLED=0).")
 
+    # Pre-synthesize the fixed robot confirmations once (forward/back/left/right/
+    # stop) so each spoken reply is instant instead of a per-command YarnGPT call,
+    # and start the continuous-drive keepalive (a direction command latches motion).
+    robot_audio = {}
+    if robot_on:
+        if speak_on and tts is not None:
+            print("Caching robot voice replies...", end=" ", flush=True)
+            for act, phrase in RESPONSES.items():
+                r = tts.synth(SynthRequest(text=phrase))
+                if r.ok and len(r.audio):
+                    robot_audio[act] = (r.audio, r.sample_rate)
+            print(f"{len(robot_audio)}/{len(RESPONSES)} cached.")
+        robot.start_keepalive()
+
     threads = [
         threading.Thread(target=segmenter, daemon=True),
         threading.Thread(target=decoder,
@@ -660,7 +692,8 @@ def main():
             target=servo_thread, args=(controller, console), daemon=True))
     if robot_on:
         threads.append(threading.Thread(
-            target=robot_thread, args=(robot, console, speak_on), daemon=True))
+            target=robot_thread, args=(robot, console, speak_on, robot_audio),
+            daemon=True))
     if chat_on:
         threads.append(threading.Thread(
             target=brain_thread, args=(brain, console, speak_on), daemon=True))
@@ -682,7 +715,8 @@ def main():
     if servo_on:
         banner += "\nServo: say 'yà sí ọ̀tún' / 'òsì' / 'padà sí àárín' / '<n> digiri' / 'dúró'."
     if robot_on:
-        banner += "\nRobot: say 'síwájú' / 'sẹ́yìn' / 'òsì' / 'ọ̀tún' / 'dúró' (add 'kíákíá'/'díẹ̀díẹ̀')."
+        banner += ("\nRobot (continuous): 'síwájú'/'sẹ́yìn'/'òsì'/'ọ̀tún' drive until "
+                   "you say 'dúró' (add 'kíákíá'/'díẹ̀díẹ̀' for speed).")
     print(banner + "\n")
 
     if robot_on:
@@ -714,6 +748,12 @@ def main():
         print("\nStopping...")
     finally:
         stop.set()
+        if robot_on:
+            robot.stop_keepalive()
+            try:
+                robot.halt()             # never leave the robot driving on exit
+            except Exception:
+                pass
         for t in threads:
             t.join(timeout=1)
         print("Stopped.")

@@ -1,5 +1,6 @@
 # test_robot.py — gate tests. Deterministic, no network, no serial, free, <2s.
 # Run: python3 -m unittest services.robot.tests.test_robot -v
+import time
 import unittest
 
 from services.robot import config, responses
@@ -320,6 +321,46 @@ class TestHold(unittest.TestCase):
             config.HOLD_REFRESH = old
         self.assertIn("board error", status)
         self.assertEqual(s.sent[-1], "S")             # still halts on the way out
+
+
+class TestContinuous(unittest.TestCase):
+    def ctrl(self, serial):
+        return RobotController(build_parser_no_grok(), RobotLink(serial))
+
+    def test_drive_latches_target_and_sends(self):
+        s = FakeSerial(ack="OK:F:200:1000")
+        c = self.ctrl(s)
+        ok, ack, err = c.drive(FORWARD, 200)
+        self.assertTrue(ok)
+        self.assertEqual(s.sent[-1], f"F,200,{config.HOLD_MS}")
+        self.assertEqual(c._target, (FORWARD, 200))
+
+    def test_halt_clears_target_and_stops(self):
+        s = FakeSerial(ack="OK:S")
+        c = self.ctrl(s)
+        c.drive(FORWARD, 200)
+        c.halt()
+        self.assertIsNone(c._target)
+        self.assertEqual(s.sent[-1], "S")
+
+    def test_keepalive_resends_until_halt(self):
+        old = config.HOLD_REFRESH
+        config.HOLD_REFRESH = 0.02
+        try:
+            s = FakeSerial(ack="OK")
+            c = self.ctrl(s)
+            c.start_keepalive()
+            c.drive(FORWARD, 200)
+            time.sleep(0.12)                      # ~6 resends
+            move = f"F,200,{config.HOLD_MS}"
+            self.assertGreaterEqual(s.sent.count(move), 3)
+            c.halt()
+            n = len(s.sent)
+            time.sleep(0.1)                       # target None -> no more moves
+            self.assertEqual(len(s.sent), n)
+            c.stop_keepalive()
+        finally:
+            config.HOLD_REFRESH = old
 
 
 def build_parser_no_grok():

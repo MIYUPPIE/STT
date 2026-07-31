@@ -110,10 +110,15 @@ class TestRule(unittest.TestCase):
         self.assertEqual(self.act("sí wá jù"), FORWARD)     # síwájú split
         self.assertEqual(self.act("sí wa jù"), FORWARD)
         self.assertEqual(self.act("sẹ́ yìn"), BACKWARD)      # sẹ́yìn split
+        self.assertEqual(self.act("ó sí"), LEFT)            # òsì split
+        self.assertEqual(self.act("ó tún"), RIGHT)          # ọ̀tún split
+        self.assertEqual(self.act("dú ró"), STOP)           # dúró split
 
     def test_non_command_none(self):
         self.assertEqual(self.act("báwo ni o ṣe wà"), NONE)
-        self.assertEqual(self.act("kò sí ìṣòro"), NONE)   # 'kosi' must not hit 'osi'
+        # negation guard keeps "kò sí" (there isn't) from despacing into a left turn
+        self.assertEqual(self.act("kò sí ìṣòro"), NONE)
+        self.assertEqual(self.act("kò sí"), NONE)
         self.assertEqual(self.act("ó ń sáré títí"), NONE) # despace must not misfire
         self.assertEqual(self.act(""), NONE)
 

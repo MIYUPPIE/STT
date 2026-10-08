@@ -1,15 +1,45 @@
 # services/robot
 
-Drives a **2-wheel (differential-drive) robot** from Yoruba voice. The ESP32-S3 is
-on **USB** and this laptop is the server: each finalized caption becomes a movement
-command sent over the serial line, the board ACKs it, and the robot **answers in
-Yoruba** (spoken with `--speak`). Used by `live_caption.py --robot`.
+Drives a **2-wheel (differential-drive) robot** from Yoruba voice. The ESP32-S3
+is reached over **WiFi** (TCP, no cable) or **USB serial**, and this laptop is the
+server: each finalized caption becomes a movement command, the board ACKs it, and
+the robot **answers in Yoruba** (spoken with `--speak`). Used by
+`live_caption.py --robot`.
 
 ```
 caption ─► IntentParser ─► RobotLink ─► "F,200,900\n" ─► ESP32-S3 ─► motors
-            rules first     wire+ACK      (USB serial)     H-bridge
-            Grok fallback                                  + Yoruba reply back
+            rules first     wire+ACK    WiFi TCP :3333     H-bridge
+            Grok fallback               or USB serial      + Yoruba reply back
 ```
+
+Mic, STT (N-ATLAS, `services/stt`) and TTS speaker stay on the laptop; only the
+movement commands travel over WiFi.
+
+## WiFi link
+
+`ROBOT_LINK=auto` (default) tries WiFi first, then USB. The laptop finds the
+board in this order:
+
+1. `ROBOT_HOST` if set (e.g. `ROBOT_HOST=192.168.43.57`, fastest, no discovery)
+2. mDNS `yoruba-robot.local` (avahi, bounded to 1.5 s)
+3. a TCP sweep of the laptop's own /24 for a host answering `P` with `PONG`
+   (outbound only, so the laptop firewall can't block it; ~1.3 s)
+
+The connection is persistent (TCP_NODELAY on both ends, WiFi modem sleep off on
+the board). If it drops, the next command reconnects once and retries; while the
+robot is unreachable, reconnects are throttled to one per second.
+
+Safety over WiFi: the board stops the motors when the TCP client disconnects,
+when WiFi drops, when a new client connects, and (as before) when no command
+byte arrives for 2 s. A crashed laptop or a dead router can never leave it
+driving.
+
+**The laptop must be on the same network as the robot.** The ESP32-S3 joins only
+2.4 GHz networks; the SSID and password are in `firmware/esp32s3_robot/secrets.h`
+(git-ignored, copy `secrets.h.example`).
+
+No board handy? `python3 -m services.robot.sim` runs a software stand-in for the
+firmware on port 3333, and the CLI below will find and drive it.
 
 The latent/deterministic split:
 
@@ -59,10 +89,10 @@ if ctrl.health():                         # serial ping (P -> PONG)
     print(res.ack, res.response)          # "OK:F:200:900"  "Mo ń lọ síwájú."
 ```
 
-Guarantees: a non-command resolves to a silent no-op (no serial write); a failed
-serial exchange leaves the robot un-driven and returns the "didn't respond" reply;
-if the port can't be opened at all, `health()` returns False with the reason and
-the pipeline keeps captioning.
+Guarantees: a non-command resolves to a silent no-op (no write to the board); a
+failed exchange leaves the robot un-driven and returns the "didn't respond" reply;
+if no link can be opened at all, `health()` returns False with the reason for
+each link tried and the pipeline keeps captioning.
 
 ## CLI
 
@@ -87,8 +117,16 @@ instead of a per-command cloud call.
 
 ## Board (`firmware/esp32s3_robot/`)
 
-Flash `firmware/esp32s3_robot/esp32s3_robot.ino` (Arduino IDE, "ESP32S3 Dev
-Module"). **Match "USB CDC On Boot" to the port your cable is in:**
+1. `cp firmware/esp32s3_robot/secrets.h.example firmware/esp32s3_robot/secrets.h`
+   and set `WIFI_SSID` / `WIFI_PASSWORD` (2.4 GHz network).
+2. Flash `firmware/esp32s3_robot/esp32s3_robot.ino` (Arduino IDE, "ESP32S3 Dev
+   Module").
+3. Open Serial Monitor at 115200. On boot it prints
+   `WiFi CONNECTED  ip=…  tcp=3333  host=yoruba-robot.local`. After that the USB
+   cable is only needed for power; a battery works.
+
+The USB serial channel still accepts the same commands. **Match "USB CDC On Boot"
+to the port your cable is in** (this only affects USB control and the boot log):
 
 - Cable in the **UART/COM port** (a CH340/CH343/CP210x bridge — `/dev/ttyACM0`
   with USB VID `1A86` or `10C4`): set **USB CDC On Boot: Disabled** so `Serial`
@@ -114,6 +152,12 @@ place (one wheel each way).
 
 | Var | Default | Meaning |
 |---|---|---|
+| `ROBOT_LINK` | `auto` | `auto` (WiFi then USB), `wifi`, or `serial` |
+| `ROBOT_HOST` | `auto` | robot IP/hostname; `auto` = mDNS then LAN sweep |
+| `ROBOT_TCP_PORT` | `3333` | firmware TCP port |
+| `ROBOT_MDNS_NAME` | `yoruba-robot.local` | mDNS name to try |
+| `ROBOT_SCAN_SUBNET` | (own /24) | sweep this prefix instead, e.g. `192.168.43` |
+| `ROBOT_CONNECT_TIMEOUT` / `SCAN_TIMEOUT` | `2.0` / `0.4` | seconds |
 | `ROBOT_PORT` | `auto` | serial port; `auto` scans USB, or pin `/dev/ttyACM0` |
 | `ROBOT_BAUD` | `115200` | serial baud |
 | `ROBOT_SPEED` | `200` | default PWM (0-255) |
@@ -122,14 +166,17 @@ place (one wheel each way).
 | `ROBOT_ENABLED` | `1` | master switch |
 | `ROBOT_GROK_FALLBACK` | `1` | use Grok for unmatched phrasing |
 
-Needs `pyserial` (`pip install pyserial`).
+USB needs `pyserial` (`pip install pyserial`); WiFi needs nothing extra.
 
 ## Tests (gate — free, deterministic, no serial, <2s)
 
-The serial transport and HTTP transport are injected with fakes.
+The serial transport and HTTP transport are injected with fakes; the WiFi tests
+run the real TCP transport against `sim.py` on 127.0.0.1 (ping, moves, async
+watchdog lines, reconnect after a WiFi blip, robot powered off, keepalive,
+discovery order, WiFi-to-USB fallback).
 
 ```bash
-python3 -m unittest services.robot.tests.test_robot -v
+python3 -m unittest services.robot.tests.test_robot services.robot.tests.test_wifi -v
 ```
 
 ## Evals (periodic — paid, needs `XAI_API_KEY`, no board)

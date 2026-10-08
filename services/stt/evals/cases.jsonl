@@ -1,0 +1,18 @@
+{"text": "síwájú", "action": "forward"}
+{"text": "máa lọ síwájú", "action": "forward"}
+{"text": "lọ síwájú kíákíá", "action": "forward"}
+{"text": "sẹ́yìn", "action": "backward"}
+{"text": "padà sẹ́yìn", "action": "backward"}
+{"text": "padà sẹ́yìn díẹ̀díẹ̀", "action": "backward"}
+{"text": "òsì", "action": "left"}
+{"text": "yà sí òsì", "action": "left"}
+{"text": "yí sí apá òsì", "action": "left"}
+{"text": "ọ̀tún", "action": "right"}
+{"text": "yà sí ọ̀tún", "action": "right"}
+{"text": "yíjú sí ọ̀tún", "action": "right"}
+{"text": "dúró", "action": "stop"}
+{"text": "dúró báyìí", "action": "stop"}
+{"text": "jọ̀wọ́ dúró", "action": "stop"}
+{"text": "báwo ni o ṣe wà", "action": "none"}
+{"text": "ẹ kú àárọ̀", "action": "none"}
+{"text": "mo fẹ́ jẹun", "action": "none"}

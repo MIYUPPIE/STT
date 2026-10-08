@@ -9,3 +9,8 @@ __pycache__/
 mms-tts-yor/
 whisper-small-yoruba/
 whisper-small-yoruba-ct2/
+natlas-yoruba-asr-ct2/
+natlas-yoruba-asr-ct2.partial/
+
+# firmware WiFi credentials — copy secrets.h.example to secrets.h
+firmware/**/secrets.h

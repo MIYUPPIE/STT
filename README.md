@@ -8,7 +8,7 @@ either:
 - **answers** you as a conversational voice assistant and speaks the reply aloud
   (`--chat`).
 
-Whisper (STT) and Silero (VAD) run **locally**. Grok (xAI) does the
+Whisper (STT, **N-ATLAS Yoruba ASR** by default) and Silero (VAD) run **locally**. Grok (xAI) does the
 correction/conversation and YarnGPT does the Yoruba speech — both are cloud
 APIs keyed from `.env`.
 
@@ -46,13 +46,15 @@ services/
   refine/                # Grok caption corrector (default)          — corrects
   tts/                   # YarnGPT Yoruba text-to-speech
   servo/                 # Yoruba command -> ESP32-S3 servo (--servo) — actuates
-  robot/                 # Yoruba command -> 2-wheel robot over USB (--robot)
+  stt/                   # STT model picker: N-ATLAS Yoruba ASR (offline build)
+  robot/                 # Yoruba command -> 2-wheel robot over WiFi/USB (--robot)
   env_loader.py          # loads repo-root .env into os.environ (no dotenv dep)
 firmware/
   esp32s3_servo/         # ESP32-S3 camera + LED + servo HTTP server (.ino)
-  esp32s3_robot/         # ESP32-S3 USB-serial H-bridge motor controller (.ino)
+  esp32s3_robot/         # ESP32-S3 WiFi + USB H-bridge motor controller (.ino)
 whisper-small-yoruba/    # base HF model        (git-ignored, see Setup)
 whisper-small-yoruba-ct2/# CTranslate2 build    (git-ignored, see Setup)
+natlas-yoruba-asr-ct2/   # N-ATLAS CTranslate2 build (git-ignored, built offline)
 ```
 
 Each service is self-contained (code, contract, tests, evals, README) and talks
@@ -64,7 +66,8 @@ to the app through a typed contract. See:
 | `services/brain`  | conversational reply to each utterance | Grok (xAI) | [brain/README.md](services/brain/README.md) |
 | `services/tts`    | Yoruba text → spoken audio | YarnGPT | [tts/README.md](services/tts/README.md) |
 | `services/servo`  | Yoruba command → ESP32-S3 servo move | rules + Grok | [servo/README.md](services/servo/README.md) |
-| `services/robot`  | Yoruba command → 2-wheel robot over USB | rules + Grok | [robot/README.md](services/robot/README.md) |
+| `services/stt`    | picks/builds the local STT model (N-ATLAS) | local | [stt/README.md](services/stt/README.md) |
+| `services/robot`  | Yoruba command → 2-wheel robot over WiFi/USB | rules + Grok | [robot/README.md](services/robot/README.md) |
 
 ## Setup
 
@@ -89,8 +92,13 @@ stdlib `wave` module.)
 
 ### 2. Model
 
-Download the base Whisper Yoruba model, then convert it to the CTranslate2
-format the app loads:
+The app uses **N-ATLAS Yoruba ASR** (`NCAIR1/Yoruba-ASR`). If it is already in
+your Hugging Face cache, nothing is downloaded: the first run builds
+`natlas-yoruba-asr-ct2/` from the cache offline (or run
+`python3 -m services.stt.model --convert`). See
+[services/stt/README.md](services/stt/README.md).
+
+The legacy model (fallback, `STT_MODEL=legacy`) is set up like this:
 
 ```bash
 python3 download.py                              # -> ./whisper-small-yoruba
@@ -131,6 +139,10 @@ python3 live_caption.py --chat
 # Force Whisper on CPU (keeps the GPU free; Grok + TTS are cloud anyway)
 python3 live_caption.py --chat --cpu
 
+# Start the app with CPU-only STT, robot control, and speech playback
+# This runs Whisper on CPU, enables the ESP32 robot command handler, and plays back results via YarnGPT TTS.
+/home/okhub/anaconda3/bin/python live_caption.py --cpu --robot --speak
+
 # Captioning only, no Grok
 python3 live_caption.py --no-refine
 
@@ -139,8 +151,9 @@ python3 live_caption.py --no-refine
 # mode above.
 python3 live_caption.py --servo
 
-# Drive a 2-wheel robot (ESP32-S3 on USB) by Yoruba voice, with a spoken Yoruba
-# reply. Flash firmware/esp32s3_robot first. Say "síwájú"/"sẹ́yìn"/"òsì"/"ọ̀tún"/"dúró".
+# Drive a 2-wheel robot (ESP32-S3 over WiFi, or USB) by Yoruba voice, with a
+# spoken Yoruba reply. Flash firmware/esp32s3_robot first (WiFi in secrets.h) and
+# put the laptop on the same WiFi. Say "síwájú"/"sẹ́yìn"/"òsì"/"ọ̀tún"/"dúró".
 python3 live_caption.py --robot --speak
 ```
 
@@ -165,6 +178,8 @@ Two lanes per service:
   python3 -m unittest services.refine.tests.test_refiner -v
   python3 -m unittest services.brain.tests.test_brain -v
   python3 -m unittest services.tts.tests.test_tts -v
+  python3 -m unittest services.stt.tests.test_stt -v
+  python3 -m unittest services.robot.tests.test_robot services.robot.tests.test_wifi -v
   ```
 
 - **Periodic evals** — paid, hit the real APIs, score quality against a threshold.
@@ -173,6 +188,7 @@ Two lanes per service:
   python3 services/refine/evals/eval_yoruba.py     # needs XAI_API_KEY
   python3 services/brain/evals/eval_brain.py       # needs XAI_API_KEY
   python3 services/tts/evals/eval_tts.py           # needs YARN_API_KEY
+  python3 services/stt/evals/eval_stt.py           # local, slow: N-ATLAS vs legacy
   ```
 
 ## Notes

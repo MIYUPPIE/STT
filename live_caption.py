@@ -4,7 +4,8 @@
 #   1. PortAudio callback        -> pushes 512-sample frames into raw_q
 #   2. VAD / segmenter thread    -> streaming Silero VAD finds speech start/end,
 #                                   emits interim "partial" snapshots + final segments
-#   3. Decode thread             -> faster-whisper captions each segment,
+#   3. Decode thread             -> faster-whisper (N-ATLAS Yoruba ASR by default,
+#                                   services/stt) captions each segment,
 #                                   prints partials live (\r) and finalizes on pause
 #   4a. Refiner thread (default) -> Grok (xAI) corrects the caption (suggestion)
 #   4b. Brain thread (--chat)    -> Grok (xAI) *responds* to the utterance, so
@@ -47,6 +48,8 @@ from services.servo.controller import build_controller
 from services.robot import config as robot_cfg
 from services.robot.controller import build_controller as build_robot
 from services.robot.responses import RESPONSES, response_for
+from services.stt import config as stt_cfg
+from services.stt.model import resolve as resolve_stt
 
 # ---------------- config ----------------
 SAMPLE_RATE = 16000
@@ -65,7 +68,7 @@ USE_GPU = torch.cuda.is_available()
 COMPUTE_TYPE = "float16" if USE_GPU else "int8"
 
 DECODE_OPTS = dict(
-    language="yo",
+    language=stt_cfg.LANGUAGE,
     beam_size=1,
     without_timestamps=True,
     condition_on_previous_text=False,
@@ -436,7 +439,7 @@ def servo_thread(controller, console):
             print(f"[servo error] {res.error}", file=sys.stderr)
 
 
-# ---------------- stage 4d: robot controller (Yoruba command -> ESP32 over USB) -
+# ---------------- stage 4d: robot controller (Yoruba command -> ESP32, WiFi/USB) -
 def robot_thread(controller, console, speak_on, robot_audio):
     """Continuous voice control: a direction command latches motion (the robot keeps
     moving until another command or 'dúró'); the confirmation is a pre-cached clip
@@ -547,7 +550,8 @@ def parse_args():
                          "(e.g. 'yà sí ọ̀tún', 'padà sí àárín', 'ọgọ́ta digiri'). "
                          "Works alongside captioning/refine/chat.")
     ap.add_argument("--robot", action="store_true",
-                    help="drive a 2-wheel robot (ESP32-S3 on USB) from Yoruba voice "
+                    help="drive a 2-wheel robot (ESP32-S3 over WiFi, or USB) from "
+                         "Yoruba voice "
                          "commands: 'síwájú', 'sẹ́yìn', 'òsì', 'ọ̀tún', 'dúró'. Speaks "
                          "a Yoruba confirmation back with --speak.")
     return ap.parse_args()
@@ -559,8 +563,13 @@ def main():
     device = "cuda" if use_gpu else "cpu"
     compute = "float16" if use_gpu else "int8"
 
+    # STT model: N-ATLAS Yoruba ASR by default (built offline from the HF cache on
+    # first run if needed), legacy whisper-small-yoruba as fallback.
+    stt = resolve_stt()
+    print(f"STT model: {stt.note}")
+
     def load_whisper(dev, comp):
-        m = WhisperModel("./whisper-small-yoruba-ct2", device=dev, compute_type=comp)
+        m = WhisperModel(stt.path, device=dev, compute_type=comp)
         list(m.transcribe(np.zeros(SAMPLE_RATE, "float32"), **DECODE_OPTS)[0])  # warmup
         return m
 
@@ -653,16 +662,19 @@ def main():
     robot = None
     robot_on = False
     if args.robot and robot_cfg.ENABLED:
-        print("Opening robot link (USB serial)...", end=" ", flush=True)
+        print(f"Finding robot (link={robot_cfg.LINK}: WiFi then USB)...",
+              end=" ", flush=True)
         robot = build_robot()
         if robot.health():
-            print(f"ok on {robot.port}. Robot control on.")
+            how = getattr(robot.link.transport, "found_by", "")
+            print(f"ok on {robot.port}{f' via {how}' if how else ''}. "
+                  "Robot control on.")
             robot_on = True
         else:
             print("unavailable - robot control off.")
             print(f"  reason: {robot.last_error}")
-            print("  fix: flash firmware/esp32s3_robot, plug in USB, "
-                  "or set ROBOT_PORT in .env")
+            print("  fix: power the robot and put this laptop on the robot's WiFi "
+                  "(or set ROBOT_HOST=<ip> in .env); or plug in USB")
     elif args.robot:
         print("Robot disabled (ROBOT_ENABLED=0).")
 

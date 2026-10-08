@@ -1,5 +1,5 @@
 # controller.py — the one object live_caption talks to. Combines the intent parser
-# (rules + optional Grok) with the serial link. handle(text) is the whole path:
+# (rules + optional Grok) with the robot link (WiFi or USB). handle(text) is the whole path:
 # Yoruba caption -> Intent -> wire command -> board, plus the Yoruba reply to
 # speak back.
 from __future__ import annotations
@@ -11,7 +11,7 @@ import threading
 from . import config, responses
 from .contract import MoveResult, NONE, STOP, LEFT, RIGHT, WIRE
 from .intent import build_parser, IntentParser
-from .link import RobotLink, open_serial
+from .link import RobotLink, open_transport
 from .responses import response_for
 
 
@@ -141,12 +141,12 @@ class RobotController:
 
 
 def build_controller() -> RobotController:
-    """Factory: intent parser (rules + Grok), plus the serial link. If the board
+    """Factory: intent parser (rules + Grok), plus the WiFi/USB link. If the board
     can't be opened, returns a controller whose health() reports why (the pipeline
     keeps captioning instead of crashing)."""
     parser = build_parser()
     try:
-        link = RobotLink(open_serial())
+        link = RobotLink(open_transport())
         ctrl = RobotController(parser, link)
     except Exception as e:
         ctrl = RobotController(parser, None, open_error=str(e))

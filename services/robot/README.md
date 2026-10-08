@@ -134,19 +134,51 @@ to the port your cable is in** (this only affects USB control and the boot log):
 - Cable in the S3's **native USB port**: set **USB CDC On Boot: Enabled**.
 
 If `--health` opens the port but gets "no ack from board", this setting is the
-mismatch (Serial is talking to the other USB port). It reads newline commands and
-drives the H-bridge:
+mismatch (Serial is talking to the other USB port).
+
+### L298N wiring (ESP32-S3)
 
 ```
-IN1 -> GPIO 4   IN2 -> GPIO 5   : left  motor    ENA/ENB jumpered HIGH
-IN3 -> GPIO 6   IN4 -> GPIO 7   : right motor     motor V+ to driver, GND common
+L298N    ESP32-S3        role
+IN1  ->  GPIO 4          left  motor direction
+IN2  ->  GPIO 5          left  motor direction
+ENA  ->  GPIO 41         left  motor SPEED (PWM)
+IN3  ->  GPIO 6          right motor direction
+IN4  ->  GPIO 7          right motor direction
+ENB  ->  GPIO 42         right motor SPEED (PWM)
+GND  ->  GND             common ground (required)
++12V/VS <- motor battery   (not the ESP32 3V3/5V pin)
 ```
 
-Speed is PWM on the IN pins. **On an L298N the ENA/ENB jumpers must be ON** (or
-the enable pins tied HIGH) or the outputs stay dead — the board will ACK commands
-but nothing moves. Keep input PWM at ~1 kHz for the L298N's slow transistors
-(`PWM_FREQ`); a MOSFET driver (TB6612/DRV8833) can go to 20 kHz. Turns spin in
-place (one wheel each way).
+**Pull the two ENA/ENB jumper caps off the L298N** before wiring ENA/ENB to the
+ESP32. With the caps on, the enables are tied HIGH: the motors run full speed
+and speed commands do nothing. 3.3 V logic is enough for the L298N inputs.
+
+GPIO 41/42 are free on Freenove and DevKitC-1 ESP32-S3 boards. They avoid the
+strapping pins (0/3/45/46), USB (19/20), UART0 (43/44), octal PSRAM (35-37), the
+camera bus and the onboard LEDs (2/21/47).
+
+How speed works (`esp32s3_robot.ino`, math in `motor_math.h`):
+
+- IN pins are plain HIGH/LOW direction lines; speed is 1 kHz LEDC PWM on ENA/ENB
+  (the L298N's slow transistors need ~1 kHz; a TB6612/DRV8833 can go to 20 kHz).
+- Command speed `1..255` maps onto `MIN_DUTY..255` (default 90), so slow
+  commands (`díẹ̀díẹ̀` = 130) still turn the wheels instead of humming.
+- Starts and direction changes ramp over `RAMP_MS` (150 ms). A reversal always
+  passes through 0 and never flips the bridge at speed, because that current
+  spike can brown out the ESP32. The ramp skips the dead zone below `MIN_DUTY`.
+- `dúró`, the watchdog, move timeouts and link loss stop the motors **instantly**
+  (no ramp).
+- Turns spin in place (one wheel each way).
+
+Tuning (top of the `.ino`, reflash after changing):
+
+| Define | Default | Tune when |
+|---|---|---|
+| `MIN_DUTY` | `90` | slow commands only hum: raise it; slow is too fast: lower it |
+| `LEFT_TRIM` / `RIGHT_TRIM` | `100` | robot curves going straight: lower the faster wheel's trim (e.g. `92`) |
+| `RAMP_MS` | `150` | jerky starts: raise it; sluggish: lower it (`0` = no ramp) |
+| `PWM_FREQ` | `1000` | leave at 1 kHz for an L298N |
 
 ## Config (`config.py`, all env-overridable)
 
@@ -176,8 +208,13 @@ watchdog lines, reconnect after a WiFi blip, robot powered off, keepalive,
 discovery order, WiFi-to-USB fallback).
 
 ```bash
-python3 -m unittest services.robot.tests.test_robot services.robot.tests.test_wifi -v
+python3 -m unittest services.robot.tests.test_robot services.robot.tests.test_wifi \
+                    services.robot.tests.test_firmware -v
 ```
+
+`test_firmware` compiles and runs the host C++ test of `motor_math.h` (speed map,
+trim, ramp, dead zone, reversal through 0) with g++, and checks that the sketch
+keeps PWM on ENA/ENB only, on ESP32-S3-safe pins.
 
 ## Evals (periodic — paid, needs `XAI_API_KEY`, no board)
 

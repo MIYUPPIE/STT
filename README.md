@@ -179,7 +179,7 @@ Two lanes per service:
   python3 -m unittest services.brain.tests.test_brain -v
   python3 -m unittest services.tts.tests.test_tts -v
   python3 -m unittest services.stt.tests.test_stt -v
-  python3 -m unittest services.robot.tests.test_robot services.robot.tests.test_wifi -v
+  python3 -m unittest services.robot.tests.test_robot services.robot.tests.test_wifi services.robot.tests.test_firmware -v
   ```
 
 - **Periodic evals** — paid, hit the real APIs, score quality against a threshold.

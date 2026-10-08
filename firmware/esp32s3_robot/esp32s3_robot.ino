@@ -13,11 +13,24 @@
 // WiFi credentials live in secrets.h (git-ignored; copy secrets.h.example). The
 // board only joins 2.4 GHz networks. On boot it prints its IP on Serial.
 //
-// H-bridge wiring (as given):
-//   IN1 -> GPIO 4   IN2 -> GPIO 5   : left  motor (A)
-//   IN3 -> GPIO 6   IN4 -> GPIO 7   : right motor (B)
-//   ENA/ENB jumpered HIGH (speed comes from PWM on the IN pins).
-//   Motor supply to the driver's V+, GND common with the ESP32.
+// L298N wiring (ESP32-S3):
+//   IN1 -> GPIO 4   IN2 -> GPIO 5   ENA -> GPIO 41 : left  motor (A)
+//   IN3 -> GPIO 6   IN4 -> GPIO 7   ENB -> GPIO 42 : right motor (B)
+//   REMOVE the ENA/ENB jumper caps on the L298N, then wire ENA/ENB to the GPIOs.
+//   With the caps on, the enables are hard-wired HIGH and speed control is dead.
+//   Motor supply to the L298N's +12V/VS, GND common with the ESP32 (required).
+//   3.3 V logic is enough for the L298N inputs (V_IH min 2.3 V).
+//
+// Speed control: IN pins are plain HIGH/LOW direction lines; speed is LEDC PWM
+// on ENA/ENB. Command speed 1..255 maps onto MIN_DUTY..255 so slow commands
+// still turn the wheels; LEFT_TRIM/RIGHT_TRIM make mismatched motors drive
+// straight; starts and direction changes ramp (RAMP_MS) so a reversal never
+// slams the bridge (that current spike can brown out the ESP32). Stops are
+// always instant.
+//
+// Pin choice (ESP32-S3): 41/42 are free on Freenove/DevKitC-1 S3 boards: not
+// strapping (0/3/45/46), not USB (19/20), not UART0 (43/44), not octal PSRAM
+// (35-37), not the camera bus or the onboard LEDs (2/21/47).
 //
 // Board setting (which USB port is your cable in?) -> Arduino IDE, Tools:
 //   * UART / COM port (a CH340/CH343/CP210x bridge, VID 1A86 or 10C4)  -> the
@@ -43,22 +56,33 @@
 #include <ESPmDNS.h>
 #include "secrets.h"
 
+#include "motor_math.h"
+
 // ---- pins ----
-#define IN1 4   // left  A
+#define IN1 4    // left  A direction
 #define IN2 5
-#define IN3 6   // right B
+#define ENA 41   // left  A speed (PWM)
+#define IN3 6    // right B direction
 #define IN4 7
+#define ENB 42   // right B speed (PWM)
 
 // ---- tuning ----
 #define DEF_SPEED     200
 #define DEF_MS        900
 #define MAX_MS        5000
 #define WATCHDOG_MS   2000
-// L298N is a slow bipolar driver: PWM on its INPUT pins must stay low (~1 kHz).
-// 20 kHz makes it weak/unresponsive. A faint 1 kHz hum at part speed is normal.
+// L298N is a slow bipolar driver: keep enable PWM low (~1 kHz). 20 kHz makes it
+// weak/unresponsive. A faint 1 kHz hum at part speed is normal.
 // (For a MOSFET driver like TB6612/DRV8833 you can raise this to 20000.)
 #define PWM_FREQ      1000
 #define PWM_RES       8       // 0..255
+#define MIN_DUTY      90      // lowest duty that still turns the wheels (tune:
+                              // raise if slow commands only hum, lower if
+                              // slow is too fast)
+#define LEFT_TRIM     100     // % (50..100): lower the faster wheel if the
+#define RIGHT_TRIM    100     // robot curves when told to go straight
+#define RAMP_MS       150     // 0 -> full speed time; 0 = no ramp
+#define RAMP_TICK_MS  2
 
 // ---- network ----
 #define TCP_PORT      3333
@@ -75,22 +99,57 @@ bool wifiWasUp = false;
 bool mdnsUp = false;
 String serLine, netLine;
 
-// PWM both pins of one motor via LEDC. speed in -255..255 (sign = direction).
-void driveMotor(int inA, int inB, int speed) {
-  if (speed > 255) speed = 255;
-  if (speed < -255) speed = -255;
-  if (speed >= 0) { ledcWrite(inA, speed);  ledcWrite(inB, 0); }
-  else            { ledcWrite(inA, 0);       ledcWrite(inB, -speed); }
+struct Motor {
+  int inA, inB, en, trim;
+  int cur;      // signed duty actually applied now
+  int target;   // signed duty we are ramping toward
+};
+Motor motorL = {IN1, IN2, ENA, LEFT_TRIM,  0, 0};
+Motor motorR = {IN3, IN4, ENB, RIGHT_TRIM, 0, 0};
+const int RAMP_STEP = motor::stepFor(RAMP_MS, RAMP_TICK_MS);
+unsigned long lastRamp = 0;
+
+// Drive one motor at signed duty: IN pins set direction, ENx PWM sets speed.
+// duty 0 = coast (both INs LOW, enable off).
+void applyMotor(Motor &m, int duty) {
+  duty = motor::clampi(duty, -255, 255);
+  if (duty == 0) {
+    ledcWrite(m.en, 0);
+    digitalWrite(m.inA, LOW);
+    digitalWrite(m.inB, LOW);
+  } else {
+    if (duty > 0) { digitalWrite(m.inB, LOW);  digitalWrite(m.inA, HIGH); }
+    else          { digitalWrite(m.inA, LOW);  digitalWrite(m.inB, HIGH); }
+    ledcWrite(m.en, duty > 0 ? duty : -duty);
+  }
+  m.cur = duty;
 }
 
-void motors(int left, int right) {
-  driveMotor(IN1, IN2, left);
-  driveMotor(IN3, IN4, right);
+// Set where each wheel should get to (sign = direction, 0..255 command speed);
+// the ramp in loop() moves there smoothly.
+void motors(int leftSpeed, int rightSpeed) {
+  int l = motor::applyTrim(motor::speedToDuty(abs(leftSpeed), MIN_DUTY), motorL.trim);
+  int r = motor::applyTrim(motor::speedToDuty(abs(rightSpeed), MIN_DUTY), motorR.trim);
+  motorL.target  = leftSpeed  < 0 ? -l : l;
+  motorR.target = rightSpeed < 0 ? -r : r;
 }
 
+// Instant stop (no ramp): dúró, watchdog, timeouts and link loss all land here.
 void stopMotors() {
-  motors(0, 0);
+  motorL.target = motorR.target = 0;
+  applyMotor(motorL, 0);
+  applyMotor(motorR, 0);
   moveUntil = 0;
+}
+
+void rampMotors() {
+  unsigned long now = millis();
+  if (now - lastRamp < RAMP_TICK_MS) return;
+  lastRamp = now;
+  if (motorL.cur != motorL.target)
+    applyMotor(motorL, motor::rampStep(motorL.cur, motorL.target, RAMP_STEP, MIN_DUTY));
+  if (motorR.cur != motorR.target)
+    applyMotor(motorR, motor::rampStep(motorR.cur, motorR.target, RAMP_STEP, MIN_DUTY));
 }
 
 // Start a timed move. dir: forward/back = both wheels same sign; turns = opposite
@@ -217,11 +276,13 @@ void serviceClient() {
 
 void setup() {
   Serial.begin(115200);
-  int pins[] = {IN1, IN2, IN3, IN4};
-  for (int p : pins) {
-    ledcAttach(p, PWM_FREQ, PWM_RES);   // core 3.x: allocates an LEDC channel
-    ledcWrite(p, 0);
+  int dirPins[] = {IN1, IN2, IN3, IN4};
+  for (int p : dirPins) {
+    pinMode(p, OUTPUT);
+    digitalWrite(p, LOW);
   }
+  ledcAttach(ENA, PWM_FREQ, PWM_RES);   // core 3.x: allocates an LEDC channel
+  ledcAttach(ENB, PWM_FREQ, PWM_RES);
   stopMotors();
   lastByte = millis();
   delay(200);
@@ -233,6 +294,7 @@ void loop() {
   serviceWifi();
   serviceClient();
   pump(Serial, Serial, serLine);
+  rampMotors();
 
   unsigned long now = millis();
   if (moveUntil && now >= moveUntil) stopMotors();          // move window elapsed

@@ -108,13 +108,20 @@ class RobotSim:
                 self.client = None
 
     def close(self):
+        """Power off: stop listening FIRST, then drop the client, so a reconnect
+        racing the shutdown is refused (as with a real board) instead of landing
+        on a half-closed listener."""
         self._stop.set()
-        self.drop_client()
+        try:
+            self.srv.shutdown(socket.SHUT_RDWR)   # stop listening now (close()
+        except OSError:                          # alone waits for a blocked
+            pass                                 # accept() in the other thread)
+        self._t.join(timeout=1)
         try:
             self.srv.close()
         except OSError:
             pass
-        self._t.join(timeout=1)
+        self.drop_client()
 
 
 if __name__ == "__main__":

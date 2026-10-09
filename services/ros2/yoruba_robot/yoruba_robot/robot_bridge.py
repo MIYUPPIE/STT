@@ -17,6 +17,7 @@ import threading
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
@@ -287,11 +288,13 @@ def main():
     node = RobotBridge()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # Ctrl+C: rclpy's signal handler has usually shut the context down
+        # already; a plain shutdown() would raise 'already called'.
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

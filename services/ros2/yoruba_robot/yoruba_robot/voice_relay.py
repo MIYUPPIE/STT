@@ -14,6 +14,7 @@ import socket
 import threading
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -131,11 +132,13 @@ def main():
     node = VoiceRelay()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # Ctrl+C: rclpy's signal handler has usually shut the context down
+        # already; a plain shutdown() would raise 'already called'.
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

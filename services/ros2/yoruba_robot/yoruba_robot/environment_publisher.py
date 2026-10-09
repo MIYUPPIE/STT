@@ -7,6 +7,7 @@
 #
 # ros2 run yoruba_robot environment_publisher
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Point
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -93,11 +94,13 @@ def main():
     node = EnvironmentPublisher()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # Ctrl+C: rclpy's signal handler has usually shut the context down
+        # already; a plain shutdown() would raise 'already called'.
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

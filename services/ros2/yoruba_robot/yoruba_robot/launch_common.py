@@ -10,9 +10,14 @@
 #              (Gazebo DiffDrive: odom→sim_base_footprint via /sim_tf→/tf;
 #               robot_state_publisher in /sim: the rest, from /sim/robot_description)
 import os
+import signal
+import subprocess
+import time
 
 from ament_index_python.packages import get_package_share_directory
-from launch.actions import IncludeLaunchDescription, SetEnvironmentVariable
+from launch.actions import (IncludeLaunchDescription, LogInfo, OpaqueFunction,
+                            RegisterEventHandler, SetEnvironmentVariable)
+from launch.event_handlers import OnShutdown
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PythonExpression
@@ -59,6 +64,90 @@ def sim_state_publisher():
                              "use_sim_time": True}])
 
 
+def find_gz_servers(run=subprocess.run) -> list[tuple[int, str]]:
+    """(pid, command) of every `gz sim` server process already running."""
+    try:
+        out = run(["pgrep", "-af", "gz sim"], capture_output=True, text=True).stdout
+    except OSError:
+        return []
+    found = []
+    for line in out.splitlines():
+        pid, _, cmd = line.partition(" ")
+        # the real server process, not the ruby wrapper or a shell mentioning it
+        if pid.isdigit() and cmd.startswith("gz sim"):
+            found.append((int(pid), cmd))
+    return found
+
+
+def _warn_stray_servers(context, *args, **kwargs):
+    stray = find_gz_servers()
+    if not stray:
+        return []
+    pids = " ".join(str(p) for p, _ in stray)
+    return [LogInfo(msg=f"WARNING: {len(stray)} other Gazebo server(s) still running "
+                        f"(pid {pids}), probably left over from an earlier launch. "
+                        f"This launch is isolated from them (own GZ_PARTITION), but they "
+                        f"use CPU: stop them with `kill {pids}`.")]
+
+
+def process_partition(pid: int) -> str | None:
+    """GZ_PARTITION a process was started with (None if unset/unreadable)."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            for var in f.read().split(b"\0"):
+                if var.startswith(b"GZ_PARTITION="):
+                    return var.split(b"=", 1)[1].decode()
+    except OSError:
+        pass
+    return None
+
+
+def stop_own_servers(partition: str, find=find_gz_servers, part_of=process_partition,
+                     kill=os.kill, wait=1.5) -> list[int]:
+    """Terminate the gz servers started in `partition` (and only those).
+
+    Needed because ros2 launch signals the `sh -c ruby gz sim` wrapper, which
+    exits without passing the signal on: the real `gz sim` server survives as
+    an orphan, keeps the CPU busy, and (without partitions) blocks the next
+    launch's spawn. Returns the pids it stopped."""
+    mine = [pid for pid, _ in find() if part_of(pid) == partition]
+    for pid in mine:
+        try:
+            kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + wait
+    for pid in mine:
+        while time.monotonic() < deadline:
+            try:
+                kill(pid, 0)                       # still alive?
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return mine
+
+
+def gazebo_isolation():
+    """Give this launch its own Gazebo transport network. Without it, a stray
+    gz server from an earlier launch (same world name) answers too, and
+    ros_gz_sim `create` hangs forever on 'Requesting list of world names'."""
+    partition = f"yoruba_{os.getpid()}"
+    return [
+        OpaqueFunction(function=_warn_stray_servers),
+        SetEnvironmentVariable("GZ_PARTITION", partition),
+        LogInfo(msg=f"Gazebo partition: {partition}  "
+                    f"(inspect with: GZ_PARTITION={partition} gz model --list)"),
+        RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(
+            function=lambda context: [LogInfo(msg="stopped own Gazebo server(s): "
+                                              f"{stop_own_servers(partition) or 'none left'}")])])),
+    ]
+
+
 def gazebo(gui: LaunchConfiguration):
     """Gazebo server (+ client window only when gui:=true: the client's Ogre
     renderer crashes on some NVIDIA/Wayland setups; RViz shows everything)."""
@@ -89,7 +178,7 @@ def gazebo(gui: LaunchConfiguration):
         remappings=[("/sim_tf", "/tf"),
                     ("/world/yoruba/model/yoruba_robot/joint_state", "/sim/joint_states")],
         parameters=[{"use_sim_time": True}])
-    return [sim, spawn, bridge]
+    return [*gazebo_isolation(), sim, spawn, bridge]
 
 
 def robot_bridge(use_sim_time, drive_real: LaunchConfiguration):

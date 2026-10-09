@@ -30,11 +30,18 @@ live_caption.py --ros ──TCP :7447──► voice_relay ──► /cmd_vel �
                                                                          RViz: see-through "Gazebo twin"
 ```
 
-`robot_bridge` is the single place where a Twist becomes a robot command: it
-snaps to the firmware's forward/back/spin moves and duty steps, and stops after
-0.5 s without commands. Gazebo is fed that shaped command (`/cmd_vel_applied`),
-so the sim reproduces the real robot's behaviour. Verified: 3 s forward = 0.500 m
-real (dead reckoning) vs 0.495 m sim; a spin = 2.801 vs 2.750 rad.
+**The RViz robot follows the real motors.** The firmware streams its applied
+motor duties over UDP 3334 (20 Hz). `robot_bridge` turns them into odometry,
+wheel angles and `/cmd_vel_applied` (which drives Gazebo), so RViz and the twin
+show what the real robot is doing, whoever commands it: ROS, voice over WiFi
+(`live_caption --robot`), USB, or the firmware's own stop. With old firmware
+(no telemetry) it falls back to dead reckoning from its own commands.
+Verified against the sim robot: driven by another client, RViz moved
+0.547 m against 0.548 m expected.
+
+`robot_bridge` also shapes commands: a Twist becomes a firmware speed (1-255)
+for forward/back/spin, it stops after 0.5 s without commands, it connects only
+to send, and it releases the robot after 3 s idle.
 
 ## TF tree
 
@@ -101,6 +108,8 @@ or the keyboard (`ros2 run teleop_twist_keyboard teleop_twist_keyboard`).
 | `drive_real` | `true` | `false` = never open the ESP32 link |
 | `require_robot` | `false` | `true` = exit if the ESP32 can't be reached |
 | `cmd_timeout` | `0.5` s | stop when `/cmd_vel` goes quiet |
+| `use_telemetry` | `true` | follow the robot's UDP motor telemetry |
+| `idle_release_s` | `3.0` s | give the robot's command slot back after this idle time |
 | `hold_ms` | `1000` | firmware move window per command |
 | `publish_rate` | `50` Hz | odom / TF / joint_states rate |
 | `wheel_radius`, `wheel_separation` | `0.0325`, `0.15` m | must equal the URDF (gate-tested via `RobotSpec`) |

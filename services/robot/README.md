@@ -38,6 +38,13 @@ driving.
 2.4 GHz networks; the SSID and password are in `firmware/esp32s3_robot/secrets.h`
 (git-ignored, copy `secrets.h.example`).
 
+**Telemetry (UDP 3334).** Send `SUB` and the robot streams
+`T,<seq>,<ms>,<dutyL>,<dutyR>,<minDuty>` at 20 Hz for 3 s (re-send every
+second). The duties are what the motors are doing right now, whoever commands
+them. Watch it live with `python3 -m services.robot.telemetry [ip]`;
+`telemetry.py` holds the parser and listener used by the ROS bridge. The robot
+is also flashable over WiFi (ArduinoOTA, `OTA_PASSWORD` in `secrets.h`).
+
 No board handy? `python3 -m services.robot.sim` runs a software stand-in for the
 firmware on port 3333, and the CLI below will find and drive it.
 

@@ -10,8 +10,38 @@ from __future__ import annotations
 import socket
 import sys
 import threading
+import time
 
 DEF_SPEED, DEF_MS, MAX_MS = 200, 900, 5000
+MIN_DUTY = 90
+
+
+def speed_to_duty(speed: int, min_duty: int = MIN_DUTY) -> int:
+    """Firmware motor::speedToDuty."""
+    if speed <= 0:
+        return 0
+    speed = min(255, max(1, speed))
+    return min_duty + (speed - 1) * (255 - min_duty) // 254
+
+
+def duties_for(line: str):
+    """Command line -> ((dutyL, dutyR), window_ms), like the firmware's motors()
+    (no ramp). None for non-motion lines."""
+    s = line.strip()
+    if not s:
+        return None
+    cmd = s[0].upper()
+    if cmd == "S":
+        return (0, 0), 0
+    if cmd not in "FBLR":
+        return None
+    parts = s.split(",")
+    speed = int(parts[1]) if len(parts) > 1 and parts[1].strip().lstrip("-").isdigit() else DEF_SPEED
+    ms = int(parts[2]) if len(parts) > 2 and parts[2].strip().isdigit() else DEF_MS
+    speed = DEF_SPEED if speed <= 0 else min(speed, 255)
+    ms = DEF_MS if ms == 0 else min(ms, MAX_MS)
+    d = speed_to_duty(speed)
+    return {"F": (d, d), "B": (-d, -d), "L": (-d, d), "R": (d, -d)}[cmd], ms
 
 
 def reply_for(line: str) -> str:
@@ -35,7 +65,7 @@ def reply_for(line: str) -> str:
 
 
 class RobotSim:
-    def __init__(self, host="127.0.0.1", port=0, banner=True):
+    def __init__(self, host="127.0.0.1", port=0, banner=True, telem_port=None):
         self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.srv.bind((host, port))
@@ -49,6 +79,56 @@ class RobotSim:
         self._lock = threading.Lock()
         self._t = threading.Thread(target=self._accept_loop, daemon=True)
         self._t.start()
+        # motor state + UDP telemetry, like the firmware (telem_port=0 -> any)
+        self._duty = (0, 0)
+        self._until = 0.0
+        self._seq = 0
+        self.subscribers = {}
+        self.telem_port = None
+        if telem_port is not None:
+            self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._udp.bind((host, telem_port))
+            self._udp.settimeout(0.02)
+            self.telem_port = self._udp.getsockname()[1]
+            self._tu = threading.Thread(target=self._telemetry_loop, daemon=True)
+            self._tu.start()
+
+    def duties(self):
+        """Motor duties right now (auto-stop after the move window)."""
+        with self._lock:
+            return self._duty if time.monotonic() < self._until else (0, 0)
+
+    def _apply(self, line):
+        r = duties_for(line)
+        if r is None:
+            return
+        (dl, dr), ms = r
+        with self._lock:
+            self._duty = (dl, dr)
+            self._until = time.monotonic() + ms / 1000 if ms else 0.0
+
+    def _telemetry_loop(self):
+        next_tx = time.monotonic()
+        while not self._stop.is_set():
+            try:
+                data, addr = self._udp.recvfrom(64)
+                if data.startswith(b"SUB"):
+                    self.subscribers[addr] = time.monotonic()
+            except (socket.timeout, OSError):
+                pass
+            now = time.monotonic()
+            if now < next_tx:
+                continue
+            next_tx = now + 0.05
+            dl, dr = self.duties()
+            line = f"T,{self._seq},{int(now * 1000)},{dl},{dr},{MIN_DUTY}\n".encode()
+            self._seq += 1
+            for addr, seen in list(self.subscribers.items()):
+                if now - seen <= 3.0:
+                    try:
+                        self._udp.sendto(line, addr)
+                    except OSError:
+                        pass
 
     def _accept_loop(self):
         self.srv.settimeout(0.05)
@@ -85,6 +165,7 @@ class RobotSim:
                 if not line:
                     continue
                 self.received.append(line)
+                self._apply(line)
                 try:
                     c.sendall((reply_for(line) + "\n").encode())
                 except OSError:
@@ -122,12 +203,18 @@ class RobotSim:
         except OSError:
             pass
         self.drop_client()
+        if self.telem_port is not None:
+            self._tu.join(timeout=1)
+            try:
+                self._udp.close()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 3333
-    sim = RobotSim("0.0.0.0", port)
-    print(f"robot sim listening on 0.0.0.0:{sim.port} (Ctrl+C to stop)")
+    sim = RobotSim("0.0.0.0", port, telem_port=3334)
+    print(f"robot sim listening on 0.0.0.0:{sim.port}, telemetry UDP {sim.telem_port} (Ctrl+C to stop)")
     try:
         threading.Event().wait()
     except KeyboardInterrupt:

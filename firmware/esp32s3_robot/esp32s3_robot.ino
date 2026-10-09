@@ -10,6 +10,10 @@
 //             a new connection replaces the old one (so a restarted laptop
 //             reconnects instantly).
 //   * USB   : Serial at 115200 (flashing, logs, and the old wired control).
+//   * UDP 3334 telemetry: send "SUB" and receive "T,seq,ms,dutyL,dutyR,minDuty"
+//             at 20 Hz for 3 s (re-send SUB every second to keep it coming).
+//   * OTA   : after one USB flash, re-flash over WiFi from the Arduino IDE
+//             (Tools > Port > yoruba-robot at <ip>). Password: OTA_PASSWORD.
 // WiFi credentials live in secrets.h (git-ignored; copy secrets.h.example). The
 // board only joins 2.4 GHz networks. On boot it prints its IP on Serial.
 //
@@ -53,7 +57,9 @@
 // WiFi client or losing WiFi stops the motors immediately.
 
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <ESPmDNS.h>
+#include <ArduinoOTA.h>
 #include "secrets.h"
 
 #include "motor_math.h"
@@ -88,9 +94,23 @@
 #define TCP_PORT      3333
 #define MDNS_NAME     "yoruba-robot"     // -> yoruba-robot.local
 #define WIFI_RETRY_MS 5000               // re-begin() if still down this long
+// Telemetry: any laptop sends "SUB" to UDP TELEM_PORT; for TELEM_TTL_MS after
+// each SUB the robot streams its actual motor duties to it at 1000/TELEM_MS Hz.
+// Works no matter who is commanding (WiFi client, USB serial, watchdog stop),
+// so RViz always shows what the motors are really doing.
+#define TELEM_PORT    3334
+#define TELEM_MS      50                 // 20 Hz
+#define TELEM_SUBS    4
+#define TELEM_TTL_MS  3000
 
 WiFiServer server(TCP_PORT);
 WiFiClient client;
+WiFiUDP telem;
+
+struct Subscriber { IPAddress ip; uint16_t port; unsigned long seen; };
+Subscriber subs[TELEM_SUBS];
+unsigned long telemSeq = 0, lastTelem = 0;
+bool netUp = false;                      // UDP + OTA started on this WiFi session
 
 unsigned long moveUntil = 0;     // 0 = stopped; else millis() deadline
 unsigned long lastByte  = 0;     // last time any command byte arrived
@@ -228,9 +248,21 @@ void serviceWifi() {
     Serial.printf("WiFi CONNECTED  ip=%s  tcp=%d  host=%s.local  rssi=%d\n",
                   WiFi.localIP().toString().c_str(), TCP_PORT, MDNS_NAME,
                   WiFi.RSSI());
-    if (!mdnsUp && MDNS.begin(MDNS_NAME)) {
-      MDNS.addService("yoruba-robot", "tcp", TCP_PORT);
-      mdnsUp = true;
+    if (!netUp) {
+      // ArduinoOTA starts mDNS with our hostname, so the board shows up in the
+      // Arduino IDE as a network port and still resolves as yoruba-robot.local.
+      ArduinoOTA.setHostname(MDNS_NAME);
+#ifdef OTA_PASSWORD
+      ArduinoOTA.setPassword(OTA_PASSWORD);
+#endif
+      ArduinoOTA.onStart([]() { stopMotors(); Serial.println("OTA update: motors stopped"); });
+      ArduinoOTA.begin();
+      if (!mdnsUp) {
+        MDNS.addService("yoruba-robot", "tcp", TCP_PORT);
+        mdnsUp = true;
+      }
+      telem.begin(TELEM_PORT);
+      netUp = true;
     }
     server.begin();
     server.setNoDelay(true);
@@ -245,6 +277,43 @@ void serviceWifi() {
     wifiTry = millis();
   }
   wifiWasUp = up;
+}
+
+// Remember (or refresh) a telemetry subscriber; the oldest slot is reused.
+void addSubscriber(IPAddress ip, uint16_t port) {
+  unsigned long now = millis();
+  int slot = 0;
+  for (int i = 0; i < TELEM_SUBS; i++) {
+    if (subs[i].port == port && subs[i].ip == ip) { slot = i; break; }
+    if (subs[i].seen < subs[slot].seen) slot = i;
+  }
+  subs[slot] = {ip, port, now};
+}
+
+// Read SUB requests; every TELEM_MS send the applied motor duties to each live
+// subscriber.
+void serviceTelemetry() {
+  if (!wifiWasUp || !netUp) return;
+  int size;
+  while ((size = telem.parsePacket()) > 0) {
+    char buf[8] = {0};
+    telem.read(buf, sizeof(buf) - 1);
+    if (buf[0] == 'S' && buf[1] == 'U' && buf[2] == 'B')
+      addSubscriber(telem.remoteIP(), telem.remotePort());
+  }
+  unsigned long now = millis();
+  if (now - lastTelem < TELEM_MS) return;
+  lastTelem = now;
+  char line[64];
+  int len = motor::formatTelemetry(line, sizeof line, telemSeq++, now,
+                                   motorL.cur, motorR.cur, MIN_DUTY);
+  if (!len) return;
+  for (int i = 0; i < TELEM_SUBS; i++) {
+    if (subs[i].port == 0 || now - subs[i].seen > TELEM_TTL_MS) continue;
+    telem.beginPacket(subs[i].ip, subs[i].port);
+    telem.write((const uint8_t *)line, len);
+    telem.endPacket();
+  }
 }
 
 // Accept a new TCP client (it replaces any old one) and pump its bytes.
@@ -292,9 +361,11 @@ void setup() {
 
 void loop() {
   serviceWifi();
+  if (netUp && wifiWasUp) ArduinoOTA.handle();
   serviceClient();
   pump(Serial, Serial, serLine);
   rampMotors();
+  serviceTelemetry();
 
   unsigned long now = millis();
   if (moveUntil && now >= moveUntil) stopMotors();          // move window elapsed

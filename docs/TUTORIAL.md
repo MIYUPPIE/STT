@@ -109,6 +109,12 @@ What it does:
   ramp over 150 ms (a hard reversal can brown out the ESP32). Stops are instant.
 - Safety: motors stop when the WiFi client disconnects, when WiFi drops, and when
   no command arrives for 2 s.
+- **Telemetry**: the robot streams its actual motor state to anyone who asks
+  (UDP **3334**, 20 Hz): `T,<seq>,<ms>,<dutyL>,<dutyR>,<minDuty>`. `dutyL`
+  and `dutyR` are the signed PWM duties on the motors right now, after ramp and
+  trim. The RViz robot follows this, so it matches the real motors whoever is
+  driving them.
+- **OTA**: after the first USB upload, you can re-flash over WiFi.
 
 **Steps**
 
@@ -116,7 +122,7 @@ What it does:
 2. Set the WiFi credentials (this file is git-ignored):
    ```bash
    cp firmware/esp32s3_robot/secrets.h.example firmware/esp32s3_robot/secrets.h
-   # edit WIFI_SSID / WIFI_PASSWORD. The ESP32 only joins 2.4 GHz networks.
+   # edit WIFI_SSID / WIFI_PASSWORD (2.4 GHz only) and OTA_PASSWORD (wireless uploads)
    ```
 3. Open `firmware/esp32s3_robot/esp32s3_robot.ino`. Tools menu:
    - Board: **ESP32S3 Dev Module**
@@ -133,7 +139,14 @@ What it does:
    ```bash
    printf 'P\n' | nc -q1 192.168.1.197 3333      # -> READY / PONG
    printf 'F,180,800\n' | nc -q1 192.168.1.197 3333   # wheels turn forward for 0.8 s
+   /home/okhub/anaconda3/bin/python -m services.robot.telemetry   # live motor duties
+   #   seq=1234  left=  +0  right=  +0  min=90  age=  12 ms  rx=57
    ```
+   Run the `nc` forward command in a second terminal while the telemetry view
+   is open: left and right jump to about +200 for 0.8 s, then return to 0.
+6. **Next uploads over WiFi**: Arduino IDE → Tools → Port → *yoruba-robot at
+   192.168.1.197* (network port) → Upload, and enter `OTA_PASSWORD`. The motors
+   stop for the update.
 
 ## 4. Laptop: speech stack
 
@@ -432,24 +445,40 @@ server never starts a renderer. That avoids the NVIDIA/Ogre crash in §15.
 
 ## 10. The nodes
 
-### robot_bridge: the command shaper
+### robot_bridge: the link between ROS and the real robot
 
 [yoruba_robot/robot_bridge.py](../services/ros2/yoruba_robot/yoruba_robot/robot_bridge.py)
 
-1. Subscribes to `/cmd_vel`. `twist_to_command()` snaps the Twist to what the
-   firmware can do: whichever of forward/back or spin dominates, with speed
-   mapped onto 90-255 duty.
-2. Sends that to the ESP32 over WiFi (reusing `services/robot/link.py`,
-   including discovery and reconnects) and resends it every 0.4 s so the
-   firmware's move window never lapses.
-3. Stops when `/cmd_vel` is silent for 0.5 s.
-4. Integrates the commanded wheel speeds into **dead-reckoning odometry**:
-   `/odom` and the `odom → base_footprint` TF. The arc formula keeps a spin in
-   place from drifting.
-5. Integrates the **wheel angles** into `/joint_states`, so
-   `robot_state_publisher` can place the wheels and they visibly turn.
-6. Publishes **`/cmd_vel_applied`**: the command the robot is actually
-   executing. **Gazebo drives from this, not from raw `/cmd_vel`.**
+**Commanding (when something publishes `/cmd_vel`)**
+
+1. `twist_to_command()` snaps the Twist to what the firmware can do: forward,
+   back or spin, whichever dominates. The result is a firmware **speed**
+   (1-255). The firmware maps speed to PWM duty itself; sending a duty here
+   would map it twice (that was a real bug: slow ran fast).
+2. Sends it over WiFi, connecting on the **first** command, not at startup. The
+   firmware accepts one command client at a time and stops the motors when a
+   new one takes over. The bridge resends every 0.4 s, stops after 0.5 s of
+   silence, and **releases the connection after 3 s idle** so another
+   controller (`live_caption --robot`) can drive.
+
+**Following the real robot (always)**
+
+3. Subscribes to the robot's **UDP telemetry** and turns the actual motor
+   duties into wheel speeds (`duties_to_wheels`). The pure function
+   `motion_source()` decides what the twin shows:
+   - **telemetry** (live, ≤ 0.3 s old): what the motors are doing, whoever
+     commands them: ROS, voice over WiFi, USB, or the firmware's own watchdog,
+     ramp and auto-stop.
+   - **telemetry-lost** (it was flowing, then stopped): shown as stopped,
+     because the firmware stops the motors when the link drops.
+   - **commands** (no telemetry ever, i.e. old firmware): dead reckoning from
+     the bridge's own commands.
+4. Integrates those wheel speeds into **odometry** (`/odom` and
+   `odom → base_footprint`; the arc formula keeps a spin from drifting) and
+   **wheel angles** (`/joint_states`).
+5. Publishes **`/cmd_vel_applied`**: the motion the real robot is making.
+   **Gazebo drives from this**, so the Gazebo twin copies the real robot even
+   when you drive it without ROS.
 
 Why step 6 matters: the first version fed Gazebo raw `/cmd_vel`. Gazebo then
 blended forward and turn motions the real robot can't do, and kept running the
@@ -566,6 +595,20 @@ Expected launch log lines:
 [voice_relay]: voice_relay listening on 127.0.0.1:7447
 ```
 
+### D. Drive directly by voice, with RViz watching
+
+You can keep using the direct WiFi path (`--robot`) and still see everything in
+RViz. `robot_bridge` only watches through telemetry and never takes control:
+
+```bash
+ros2 launch yoruba_robot twin.launch.py voice:=false        # terminal 1
+/home/okhub/anaconda3/bin/python live_caption.py --cpu --robot --speak   # terminal 2
+```
+
+Start the launch first. It finds the robot by name (mDNS) without connecting,
+so it never interrupts the voice controller. If mDNS is unavailable it falls
+back to a network scan, which does briefly connect.
+
 ### Verify from the command line
 
 ```bash
@@ -614,6 +657,8 @@ cd services/ros2/yoruba_robot && python3 -m pytest test/test_markers.py test/tes
 | `test_environment` | arena validity, `arena.sdf` and `*.rviz` identical to their generators |
 | `test_markers` | one marker per part, unique ids, obstacles on the floor |
 | `test_voice_relay` | the `F,200` line parser |
+| `services/robot/tests/test_telemetry` | telemetry format (same line as the C++ test), the listener against the sim robot, auto-stop, a second client driving |
+| `test_kinematics` (mapping) | speed→duty identical to the firmware; no double mapping; telemetry duties agree with the command model; `motion_source` choices |
 
 ## 15. Troubleshooting
 
@@ -636,6 +681,10 @@ Every one of these happened while building this project.
 | `voice_relay` won't start: address in use | another voice_relay on port 7447 | the launch starts one; don't also `ros2 run` it |
 | `no robot answered on ... port 3333` | laptop not on the robot's WiFi | join the same network, or set `ROBOT_HOST=<ip>` in `.env` |
 | `ros2 topic list` misses topics | CLI daemon is stale | `ros2 daemon stop`, or add `--no-daemon` |
+| RViz robot doesn't move when the real one does | firmware without telemetry; the log says `no telemetry (old firmware?)` | flash the current firmware (§3); check with `python3 -m services.robot.telemetry` |
+| Log: `telemetry lost` | WiFi drop or robot off; the twin shows it stopped | check power and WiFi; telemetry resumes on its own |
+| Slow commands from ROS ran fast | speed was converted to duty twice | fixed: the bridge sends firmware speed (1-255) |
+| Voice controller drops when ROS starts | the bridge's startup probe took the robot's single command slot | the bridge now connects only to send, and releases after 3 s idle |
 
 ## 16. Customize
 

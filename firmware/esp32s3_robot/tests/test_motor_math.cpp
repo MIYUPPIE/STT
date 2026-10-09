@@ -3,6 +3,7 @@
 // (services/robot/tests/test_firmware_math.py builds and runs it.)
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include "../motor_math.h"
 
 using namespace motor;
@@ -84,6 +85,18 @@ int main() {
   EQ(stepFor(0, 2), 0);
   EQ(stepFor(150, 2), 3);
   EQ(stepFor(10000, 2), 1);
+
+  // telemetry line format (parsed by services/robot/telemetry.py)
+  {
+    char buf[64];
+    int len = formatTelemetry(buf, sizeof buf, 42, 123456, -200, 219, 90);
+    EQ(len, (int)std::strlen("T,42,123456,-200,219,90\n"));
+    if (std::strcmp(buf, "T,42,123456,-200,219,90\n") != 0) {
+      std::printf("FAIL telemetry line: %s", buf); fails++;
+    }
+    char tiny[8];
+    EQ(formatTelemetry(tiny, sizeof tiny, 42, 123456, -200, 219, 90), 0);   // truncated -> 0
+  }
 
   if (fails) { std::printf("%d failure(s)\n", fails); return 1; }
   std::printf("motor_math: all tests passed\n");

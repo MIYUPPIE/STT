@@ -11,7 +11,8 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
-                            IncludeLaunchDescription)
+                            IncludeLaunchDescription,
+                            SetEnvironmentVariable)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -75,6 +76,10 @@ def generate_launch_description():
         output="screen")
 
     return LaunchDescription([
+        # Wayland sessions: Qt would open a Wayland surface Ogre's GLX can't
+        # attach to ('Invalid parentWindowHandle'). xcb routes through
+        # Xwayland, which Ogre speaks fluently. No-op on pure X11 sessions.
+        SetEnvironmentVariable('QT_QPA_PLATFORM', 'xcb'),
         DeclareLaunchArgument("gui", default_value="false",
                               description="Also open the Gazebo client window "
                               "(crashes on some NVIDIA+Noble combos; RViz "

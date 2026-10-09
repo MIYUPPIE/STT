@@ -1,16 +1,19 @@
-# sim.launch.py — Gazebo (gz-sim) + robot_state_publisher + RViz, no real
-# hardware. The sim robot subscribes to /cmd_vel directly (gz-sim DiffDrive
-# plugin, bridged from ROS2 by ros_gz_bridge), so you can drive it with
-# teleop_twist_keyboard, voice_relay, or any Twist publisher.
+# sim.launch.py — Gazebo physics (server) + robot_state_publisher + RViz. No
+# Gazebo client window by default: its Ogre renderer crashes on some NVIDIA +
+# Noble combos (observed here: driver 580 / RTX 2060 / Jazzy). The physics
+# server, DiffDrive plugin, bridges and RViz all work fine without the Gazebo
+# window — RViz is the visualizer either way.
 #
-# ros2 launch yoruba_robot sim.launch.py
+# ros2 launch yoruba_robot sim.launch.py             # server + RViz only
+# ros2 launch yoruba_robot sim.launch.py gui:=true   # also open Gazebo
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
+                            IncludeLaunchDescription)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command
+from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -21,10 +24,15 @@ def generate_launch_description():
     world = os.path.join(pkg, "worlds", "empty.sdf")
     rviz_cfg = os.path.join(pkg, "config", "robot.rviz")
 
-    # xacro produces the URDF XML string; feed it both to RSP (for RViz /tf) and
-    # to Gazebo's /world/.../create as the model to spawn.
-    # ParameterValue(..., value_type=str): xacro returns URDF XML; without
-    # this Jazzy tries to YAML-parse it and fails.
+    gui = LaunchConfiguration("gui")
+    # -s = server only; drop -s to also start the client window. GUI engine kept
+    # on Ogre1 for the (rare) case the Gazebo client does open on this box.
+    gz_args = PythonExpression([
+        "'-r -v 2 --render-engine-gui ogre ", world, "' if '", gui,
+        "' == 'true' else '-r -s -v 2 ", world, "'"])
+
+    # ParameterValue(..., value_type=str): xacro returns URDF XML; without this
+    # Jazzy YAML-parses it and the launch fails.
     robot_description = {
         "robot_description": ParameterValue(
             Command(["xacro ", urdf, " use_sim:=true"]), value_type=str)
@@ -33,7 +41,7 @@ def generate_launch_description():
     gz_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory("ros_gz_sim"), "launch", "gz_sim.launch.py")),
-        launch_arguments={"gz_args": f"-r -v 2 --render-engine-gui ogre {world}"}.items())
+        launch_arguments={"gz_args": gz_args}.items())
 
     rsp = Node(package="robot_state_publisher", executable="robot_state_publisher",
                parameters=[robot_description, {"use_sim_time": True}],
@@ -45,8 +53,6 @@ def generate_launch_description():
                             "-x", "0", "-y", "0", "-z", "0.03"],
                  output="screen")
 
-    # Bridge the sim's /cmd_vel + /sim_odom + /clock + joint states between
-    # Gazebo transport and ROS2. One direction each; see ros_gz_bridge README.
     bridge = Node(package="ros_gz_bridge", executable="parameter_bridge",
                   arguments=[
                       "/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist",
@@ -62,10 +68,16 @@ def generate_launch_description():
     rviz = Node(package="rviz2", executable="rviz2", arguments=["-d", rviz_cfg],
                 parameters=[{"use_sim_time": True}], output="log")
 
-    teleop_hint = ExecuteProcess(
+    hint = ExecuteProcess(
         cmd=["bash", "-c",
              "echo; echo '--- drive the sim:'; "
              "echo '  ros2 run teleop_twist_keyboard teleop_twist_keyboard'; echo"],
         output="screen")
 
-    return LaunchDescription([gz_launch, rsp, spawn, bridge, rviz, teleop_hint])
+    return LaunchDescription([
+        DeclareLaunchArgument("gui", default_value="false",
+                              description="Also open the Gazebo client window "
+                              "(crashes on some NVIDIA+Noble combos; RViz "
+                              "shows the robot either way)."),
+        gz_launch, rsp, spawn, bridge, rviz, hint,
+    ])

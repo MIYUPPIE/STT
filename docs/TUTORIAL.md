@@ -684,6 +684,8 @@ Every one of these happened while building this project.
 | RViz robot doesn't move when the real one does | firmware without telemetry; the log says `no telemetry (old firmware?)` | flash the current firmware (§3); check with `python3 -m services.robot.telemetry` |
 | Log: `telemetry lost` | WiFi drop or robot off; the twin shows it stopped | check power and WiFi; telemetry resumes on its own |
 | Slow commands from ROS ran fast | speed was converted to duty twice | fixed: the bridge sends firmware speed (1-255) |
+| Spawn hangs: `[ros_gz_sim]: Requesting list of world names.` every 5 s | an orphaned `gz sim` server from an earlier launch (Ctrl+C killed its wrapper, not the server) answers on the same Gazebo network | each launch now runs on its own `GZ_PARTITION`, warns about stray servers, and stops its own server on exit. Clean old ones: `pgrep -af "gz sim"`, then `kill <pid>` |
+| `process has died ... RCLError: rcl_shutdown already called` on Ctrl+C | the node called `rclpy.shutdown()` after ROS had already shut it down | nodes use `rclpy.try_shutdown()` |
 | Voice controller drops when ROS starts | the bridge's startup probe took the robot's single command slot | the bridge now connects only to send, and releases after 3 s idle |
 
 ## 16. Customize

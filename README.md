@@ -190,7 +190,7 @@ python3 -m unittest services.robot.tests.test_robot \
                     services.ros2.yoruba_robot.test.test_description
 ```
 
-247 tests pass (237 here + 10 ROS-message tests run under system Python); this covers:
+All gate tests pass: 239 from the repo root (2 launch tests skip outside ROS) plus the package suite (60) under ROS's Python, `cd services/ros2/yoruba_robot && python3 -m pytest test/`. They cover:
 - STT model resolution + offline build from the HF cache
 - Yoruba parser (fuzzy autocorrect, negations, split words, speed words)
 - WiFi link (TCP transport, mDNS, LAN sweep, reconnect on drops, lazy connect)
@@ -219,6 +219,7 @@ python3 services/stt/evals/eval_stt.py           # local, free, slow: N-ATLAS vs
 | RViz aborts: `Invalid parentWindowHandle` | Wayland session; the launch sets `QT_QPA_PLATFORM=xcb` (pull latest) |
 | Gazebo window segfaults (`Hlms::createDatablock`) | default is server-only; RViz shows both robots. `gui:=true` to retry the window |
 | RobotModel red in RViz | stale duplicate launches: `pgrep -af "ros2 launch"`, stop extras, relaunch |
+| Spawn stuck on `Requesting list of world names` | leftover `gz sim` server: `pgrep -af "gz sim"`, `kill <pid>` (new launches isolate themselves and clean up on exit) |
 | `no robot answered on <subnet> port 3333` | laptop + ESP32 must be on the same WiFi; pin with `ROBOT_HOST=<ip>` in `.env` |
 | `--health` ACK fails but port opens | Arduino "USB CDC On Boot" doesn't match the USB port the cable is in |
 | Slow commands only hum, don't move | raise `MIN_DUTY` in [esp32s3_robot.ino](firmware/esp32s3_robot/esp32s3_robot.ino) |

@@ -49,6 +49,45 @@ class TestArena(unittest.TestCase):
                          "wall_west", "crate", "bin", "block"} <= models)
 
 
+class TestStrayGazebo(unittest.TestCase):
+    """launch_common.find_gz_servers: only real `gz sim` server processes."""
+
+    def test_finds_only_servers(self):
+        import subprocess
+        try:
+            from services.ros2.yoruba_robot.yoruba_robot.launch_common import find_gz_servers
+        except ImportError:                      # launch/launch_ros not in this Python
+            self.skipTest("ROS launch modules not importable")
+        out = ("513620 gz sim -r -s -v 2 /x/arena.sdf\n"
+               "623308 /bin/sh -c ruby /opt/ros/jazzy/opt/gz_tools_vendor/bin/gz sim -r -s\n"
+               "700001 bash -c pgrep -af gz sim\n")
+        fake = lambda *a, **k: subprocess.CompletedProcess(a, 0, out, "")
+        self.assertEqual(find_gz_servers(run=fake), [(513620, "gz sim -r -s -v 2 /x/arena.sdf")])
+
+
+class TestOwnServerCleanup(unittest.TestCase):
+    def test_stops_only_own_partition(self):
+        try:
+            from services.ros2.yoruba_robot.yoruba_robot.launch_common import stop_own_servers
+        except ImportError:
+            self.skipTest("ROS launch modules not importable")
+        servers = [(10, "gz sim a"), (11, "gz sim b"), (12, "gz sim c")]
+        parts = {10: "yoruba_1", 11: "yoruba_2", 12: None}
+        alive, signals = {10, 11, 12}, []
+
+        def kill(pid, sig):
+            if pid not in alive:
+                raise ProcessLookupError
+            signals.append((pid, sig))
+            if sig:                                   # SIGTERM/SIGKILL -> gone
+                alive.discard(pid)
+
+        stopped = stop_own_servers("yoruba_1", find=lambda: servers,
+                                   part_of=parts.get, kill=kill, wait=0.2)
+        self.assertEqual(stopped, [10])
+        self.assertEqual(alive, {11, 12})             # other launches untouched
+
+
 class TestRvizLayouts(unittest.TestCase):
     def test_committed_layouts_match_generator(self):
         for name, text in make_rviz.LAYOUTS.items():

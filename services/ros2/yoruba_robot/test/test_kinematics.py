@@ -7,7 +7,8 @@ import unittest
 
 from services.ros2.yoruba_robot.yoruba_robot.kinematics import (
     FORWARD, BACKWARD, LEFT, RIGHT, STOP, OdomState, RobotSpec,
-    command_to_wheels, integrate, quaternion_from_yaw, twist_to_command, _wrap)
+    advance_wheel_angles, command_to_wheels, integrate, quaternion_from_yaw,
+    twist_to_command, _wrap)
 
 
 SPEC = RobotSpec()
@@ -126,6 +127,32 @@ class TestQuaternion(unittest.TestCase):
         self.assertAlmostEqual(_wrap(3 * math.pi), math.pi)
         self.assertAlmostEqual(_wrap(-3 * math.pi), math.pi)
         self.assertAlmostEqual(_wrap(0.5), 0.5)
+
+
+class TestWheelAngles(unittest.TestCase):
+    def test_one_revolution_per_circumference(self):
+        """Rolling 2*pi*r metres turns the wheel exactly once (back to 0)."""
+        circ = 2 * math.pi * SPEC.wheel_radius
+        left = right = 0.0
+        for _ in range(1000):
+            left, right = advance_wheel_angles(left, right, circ, circ, 0.001, SPEC)
+        self.assertAlmostEqual(math.sin(left), 0.0, places=6)
+        self.assertAlmostEqual(math.cos(left), 1.0, places=6)
+
+    def test_quarter_turn_and_sign(self):
+        q = math.pi / 2 * SPEC.wheel_radius                  # metres for 90 deg
+        left, right = advance_wheel_angles(0.0, 0.0, q, -q, 1.0, SPEC)
+        self.assertAlmostEqual(left, math.pi / 2)
+        self.assertAlmostEqual(right, -math.pi / 2)          # backwards = negative
+
+    def test_spin_in_place_wheels_opposite(self):
+        vl, vr = command_to_wheels(LEFT, 255, SPEC)
+        left, right = advance_wheel_angles(0.0, 0.0, vl, vr, 0.1, SPEC)
+        self.assertLess(left, 0)
+        self.assertGreater(right, 0)
+
+    def test_dt_zero(self):
+        self.assertEqual(advance_wheel_angles(0.3, -0.2, 1, 1, 0, SPEC), (0.3, -0.2))
 
 
 if __name__ == "__main__":

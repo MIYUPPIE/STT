@@ -130,3 +130,15 @@ def _wrap(a: float) -> float:
 def quaternion_from_yaw(theta: float) -> tuple[float, float, float, float]:
     """(x, y, z, w) quaternion for a planar yaw rotation. ROS message order."""
     return 0.0, 0.0, sin(theta / 2), cos(theta / 2)
+
+
+def advance_wheel_angles(left: float, right: float, v_left: float,
+                         v_right: float, dt: float, spec: RobotSpec
+                         ) -> tuple[float, float]:
+    """Wheel joint angles (rad) after rolling at (v_left, v_right) m/s for dt.
+    Positive = rolling forward (joint axis +y in the URDF). Wrapped to
+    (-pi, pi] so the published values stay small; RViz only needs the angle."""
+    if dt <= 0:
+        return left, right
+    return (_wrap(left + v_left / spec.wheel_radius * dt),
+            _wrap(right + v_right / spec.wheel_radius * dt))

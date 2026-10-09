@@ -105,33 +105,33 @@ python3 live_caption.py --cpu --robot --speak
 Say `síwájú` (forward), `sẹ́yìn` (back), `òsì` (left), `ọ̀tún` (right),
 `dúró` (stop). Add `kíákíá` for fast, `díẹ̀díẹ̀` for slow.
 
-### Simulator only (no real robot)
+### Simulator only (real robot untouched)
 
 ```bash
-# shell 1:
 ros2 launch yoruba_robot sim.launch.py
-# shell 2:
-ros2 run teleop_twist_keyboard teleop_twist_keyboard
+ros2 run teleop_twist_keyboard teleop_twist_keyboard     # second terminal
 ```
 
 ### Full digital twin (real + sim, driven by voice)
 
-Three terminals, each sourced:
+Two terminals, each sourced (`voice_relay` starts inside the launch):
 
 ```bash
-# shell 1 — Gazebo + robot_bridge + RViz
+# terminal 1 — Gazebo + robot_bridge + voice_relay + RViz
 ros2 launch yoruba_robot twin.launch.py
 
-# shell 2 — voice line listener
-ros2 run yoruba_robot voice_relay
-
-# shell 3 — your voice
+# terminal 2 — your voice
 /home/okhub/anaconda3/bin/python live_caption.py --cpu --ros --speak
 ```
 
-RViz shows both odometries: green trail = real robot dead reckoning, orange =
-Gazebo ground truth. Divergence is calibration drift you can tune out of
-`robot_bridge` parameters.
+RViz draws the robot inside a 3 x 3 m arena: the solid model is the real robot
+(dead reckoning, green trail), the see-through model is the Gazebo twin
+(physics, orange trail). Gazebo executes exactly the command the real robot
+executes, so a gap between them is calibration drift (tutorial §13).
+Options: `drive_real:=false` (don't move the ESP32), `gui:=true` (also open
+the Gazebo window).
+
+**Full build guide, hardware to digital twin: [docs/TUTORIAL.md](docs/TUTORIAL.md).**
 
 ### Other modes
 
@@ -184,16 +184,19 @@ python3 -m unittest services.robot.tests.test_robot \
                     services.tts.tests.test_tts \
                     services.refine.tests.test_refiner \
                     services.brain.tests.test_brain \
-                    services.ros2.yoruba_robot.test.test_kinematics
+                    services.ros2.yoruba_robot.test.test_kinematics \
+                    services.ros2.yoruba_robot.test.test_environment \
+                    services.ros2.yoruba_robot.test.test_description
 ```
 
-195 tests pass; this covers:
+224 tests pass (214 here + 10 ROS-message tests run under system Python); this covers:
 - STT model resolution + offline build from the HF cache
 - Yoruba parser (fuzzy autocorrect, negations, split words, speed words)
 - WiFi link (TCP transport, mDNS, LAN sweep, reconnect on drops)
 - Firmware wiring guard + host C++ test of the ENA/ENB speed math
 - ROS line relay (reconnect, fail-fast)
-- ROS kinematics (Twist↔F/B/L/R, dead-reckoning odometry including spin-no-drift)
+- ROS kinematics (Twist↔F/B/L/R, dead-reckoning odometry including spin-no-drift, wheel angles)
+- Robot URDF geometry, arena, and generated Gazebo world + RViz layouts staying in sync
 - Grok and YarnGPT services (injected HTTP transport)
 
 Paid evals hit the real APIs and score quality against a threshold:
@@ -211,6 +214,9 @@ python3 services/stt/evals/eval_stt.py           # local, free, slow: N-ATLAS vs
 |---|---|
 | `Package 'yoruba_robot' not found` | `source ~/ros2_ws/install/setup.bash` in that terminal |
 | `Unable to parse the value of parameter robot_description as yaml` | pull latest; launch files wrap xacro in `ParameterValue(value_type=str)` |
+| RViz aborts: `Invalid parentWindowHandle` | Wayland session; the launch sets `QT_QPA_PLATFORM=xcb` (pull latest) |
+| Gazebo window segfaults (`Hlms::createDatablock`) | default is server-only; RViz shows both robots. `gui:=true` to retry the window |
+| RobotModel red in RViz | stale duplicate launches: `pgrep -af "ros2 launch"`, stop extras, relaunch |
 | `no robot answered on <subnet> port 3333` | laptop + ESP32 must be on the same WiFi; pin with `ROBOT_HOST=<ip>` in `.env` |
 | `--health` ACK fails but port opens | Arduino "USB CDC On Boot" doesn't match the USB port the cable is in |
 | Slow commands only hum, don't move | raise `MIN_DUTY` in [esp32s3_robot.ino](firmware/esp32s3_robot/esp32s3_robot.ino) |

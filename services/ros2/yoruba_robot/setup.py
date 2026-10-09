@@ -36,6 +36,7 @@ setup(
         "console_scripts": [
             "robot_bridge = yoruba_robot.robot_bridge:main",
             "voice_relay = yoruba_robot.voice_relay:main",
+            "environment_publisher = yoruba_robot.environment_publisher:main",
         ],
     },
 )

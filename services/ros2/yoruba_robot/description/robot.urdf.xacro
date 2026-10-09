@@ -1,0 +1,145 @@
+<?xml version="1.0"?>
+<!--
+  robot.urdf.xacro — the digital twin: a 2-wheel differential-drive robot that
+  matches the real chassis (65 mm wheel, 150 mm wheelbase; override from
+  launch). Same model goes to Gazebo (simulated physics) and RViz (visuals + TF
+  from the robot_bridge), so sim and reality share one URDF.
+
+  Frames (REP-103, +x forward, +z up):
+    base_footprint  -> on the ground
+    base_link       -> body origin, at the wheel axle height
+    left_wheel      -> y = +wheel_sep/2
+    right_wheel     -> y = -wheel_sep/2
+    caster_wheel    -> ball caster at the rear, matches most hobby chassis
+
+  Gazebo diff_drive plugin publishes /odom and TF when running in sim; the real
+  robot_bridge publishes the same, so RViz tooling works unchanged in both.
+-->
+<robot name="yoruba_robot" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <xacro:arg name="wheel_radius"     default="0.0325"/>
+  <xacro:arg name="wheel_separation" default="0.15"/>
+  <xacro:arg name="wheel_width"      default="0.025"/>
+  <xacro:arg name="body_length"      default="0.17"/>
+  <xacro:arg name="body_width"       default="0.12"/>
+  <xacro:arg name="body_height"      default="0.06"/>
+  <xacro:arg name="caster_radius"    default="0.015"/>
+  <xacro:arg name="use_sim"          default="true"/>
+
+  <xacro:property name="wheel_radius"     value="$(arg wheel_radius)"/>
+  <xacro:property name="wheel_separation" value="$(arg wheel_separation)"/>
+  <xacro:property name="wheel_width"      value="$(arg wheel_width)"/>
+  <xacro:property name="body_length"      value="$(arg body_length)"/>
+  <xacro:property name="body_width"       value="$(arg body_width)"/>
+  <xacro:property name="body_height"      value="$(arg body_height)"/>
+  <xacro:property name="caster_radius"    value="$(arg caster_radius)"/>
+
+  <!-- Inertia helpers. Order-of-magnitude correct; mass tuned so the sim robot
+       doesn't tip when a turn command accelerates one wheel. -->
+  <xacro:macro name="box_inertial" params="mass x y z">
+    <inertial>
+      <mass value="${mass}"/>
+      <inertia ixx="${mass*(y*y+z*z)/12}" iyy="${mass*(x*x+z*z)/12}"
+               izz="${mass*(x*x+y*y)/12}" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </xacro:macro>
+  <xacro:macro name="cyl_inertial" params="mass r h">
+    <inertial>
+      <mass value="${mass}"/>
+      <inertia ixx="${mass*(3*r*r+h*h)/12}" iyy="${mass*(3*r*r+h*h)/12}"
+               izz="${mass*r*r/2}" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- base_footprint sits on the ground; base_link at the wheel axle. -->
+  <link name="base_footprint"/>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${wheel_radius}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 ${body_height/2}"/>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+      <material name="chassis"><color rgba="0.2 0.4 0.9 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${body_height/2}"/>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+    </collision>
+    <xacro:box_inertial mass="0.8" x="${body_length}" y="${body_width}" z="${body_height}"/>
+  </link>
+
+  <xacro:macro name="wheel" params="prefix y_sign">
+    <link name="${prefix}_wheel">
+      <visual>
+        <origin rpy="1.5707963 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="wheel"><color rgba="0.1 0.1 0.1 1"/></material>
+      </visual>
+      <collision>
+        <origin rpy="1.5707963 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <xacro:cyl_inertial mass="0.05" r="${wheel_radius}" h="${wheel_width}"/>
+    </link>
+    <joint name="${prefix}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${prefix}_wheel"/>
+      <origin xyz="0 ${y_sign*wheel_separation/2} 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+  <xacro:wheel prefix="left"  y_sign=" 1"/>
+  <xacro:wheel prefix="right" y_sign="-1"/>
+
+  <!-- Ball caster at the rear. In Gazebo it's a tiny low-friction sphere so the
+       chassis stays level without a third powered wheel. -->
+  <link name="caster_wheel">
+    <visual>
+      <geometry><sphere radius="${caster_radius}"/></geometry>
+      <material name="caster"><color rgba="0.6 0.6 0.6 1"/></material>
+    </visual>
+    <collision><geometry><sphere radius="${caster_radius}"/></geometry></collision>
+    <xacro:cyl_inertial mass="0.01" r="${caster_radius}" h="${caster_radius*2}"/>
+  </link>
+  <joint name="caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster_wheel"/>
+    <origin xyz="${-body_length/2 + caster_radius} 0 ${-wheel_radius + caster_radius}"/>
+  </joint>
+
+  <xacro:if value="$(arg use_sim)">
+    <!-- Gazebo plugin surfaces + materials. mu/mu2 low on the caster so the
+         robot can turn in place without the ball locking the yaw. -->
+    <gazebo reference="left_wheel"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
+    <gazebo reference="right_wheel"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
+    <gazebo reference="caster_wheel"><mu1>0.0</mu1><mu2>0.0</mu2></gazebo>
+
+    <!-- diff_drive publishes /cmd_vel -> wheels, and /odom + TF, matching the
+         real robot_bridge. Both targets subscribe to the same /cmd_vel, so one
+         voice command drives both at the same time (the digital twin). -->
+    <gazebo>
+      <plugin filename="gz-sim-diff-drive-system"
+              name="gz::sim::systems::DiffDrive">
+        <left_joint>left_wheel_joint</left_joint>
+        <right_joint>right_wheel_joint</right_joint>
+        <wheel_separation>${wheel_separation}</wheel_separation>
+        <wheel_radius>${wheel_radius}</wheel_radius>
+        <odom_publish_frequency>50</odom_publish_frequency>
+        <topic>cmd_vel</topic>
+        <odom_topic>sim_odom</odom_topic>
+        <frame_id>sim_odom</frame_id>
+        <child_frame_id>sim_base_link</child_frame_id>
+        <tf_topic>sim_tf</tf_topic>
+      </plugin>
+      <plugin filename="gz-sim-joint-state-publisher-system"
+              name="gz::sim::systems::JointStatePublisher">
+        <joint_name>left_wheel_joint</joint_name>
+        <joint_name>right_wheel_joint</joint_name>
+      </plugin>
+    </gazebo>
+  </xacro:if>
+</robot>

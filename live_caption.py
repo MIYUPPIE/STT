@@ -47,6 +47,8 @@ from services.servo import config as servo_cfg
 from services.servo.controller import build_controller
 from services.robot import config as robot_cfg
 from services.robot.controller import build_controller as build_robot
+from services.robot.intent import build_parser as build_robot_parser
+from services.robot.ros_sink import build_ros_controller
 from services.robot.responses import RESPONSES, response_for
 from services.stt import config as stt_cfg
 from services.stt.model import resolve as resolve_stt
@@ -554,6 +556,16 @@ def parse_args():
                          "Yoruba voice "
                          "commands: 'síwájú', 'sẹ́yìn', 'òsì', 'ọ̀tún', 'dúró'. Speaks "
                          "a Yoruba confirmation back with --speak.")
+    ap.add_argument("--ros", action="store_true",
+                    help="publish each Yoruba command onto ROS2 /cmd_vel via the "
+                         "yoruba_robot voice_relay node (localhost TCP). Pair "
+                         "with 'ros2 launch yoruba_robot sim.launch.py' or "
+                         "'twin.launch.py'. If --robot is also on, voice_relay "
+                         "owns the ESP32 (one writer).")
+    ap.add_argument("--ros-host", default=None,
+                    help="voice_relay host (default 127.0.0.1 or $ROS_SINK_HOST)")
+    ap.add_argument("--ros-port", default=None, type=int,
+                    help="voice_relay port (default 7447 or $ROS_SINK_PORT)")
     return ap.parse_args()
 
 
@@ -677,6 +689,31 @@ def main():
                   "(or set ROBOT_HOST=<ip> in .env); or plug in USB")
     elif args.robot:
         print("Robot disabled (ROBOT_ENABLED=0).")
+
+    # --ros: publish each parsed command onto /cmd_vel via the voice_relay node.
+    # If --robot is also on, voice_relay (not us) owns the ESP32: the real robot
+    # and Gazebo twin both subscribe to the same /cmd_vel. If --robot is off,
+    # --ros alone drives only the sim.
+    if args.ros:
+        parser_ = (robot.parser if robot_on and robot is not None
+                   else build_robot_parser())
+        print("Connecting ROS voice_relay...", end=" ", flush=True)
+        ros_ctrl = build_ros_controller(parser_, args.ros_host, args.ros_port)
+        if ros_ctrl.health():
+            print(f"ok on {ros_ctrl.port}.")
+            if robot_on and robot is not None and robot is not ros_ctrl:
+                try:
+                    robot.halt(); robot.stop_keepalive(); robot.close()
+                except Exception:
+                    pass
+            robot = ros_ctrl
+            robot_on = True
+        else:
+            print("unavailable - ROS control off.")
+            print(f"  reason: {ros_ctrl.last_error}")
+            print("  fix: ros2 launch yoruba_robot sim.launch.py "
+                  "(or twin.launch.py), then: "
+                  "ros2 run yoruba_robot voice_relay")
 
     # Pre-synthesize the fixed robot confirmations once (forward/back/left/right/
     # stop) so each spoken reply is instant instead of a per-command YarnGPT call,

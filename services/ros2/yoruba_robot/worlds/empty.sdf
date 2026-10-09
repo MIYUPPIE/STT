@@ -14,7 +14,10 @@
     <plugin filename="gz-sim-scene-broadcaster-system"
             name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
-      <render_engine>ogre2</render_engine>
+      <!-- Ogre2 segfaults in Hlms::createDatablock on some NVIDIA driver +
+           distro combos (observed on 580.119.02 / RTX 2060 + Ubuntu Noble).
+           Ogre1 is the stable fallback and sufficient for RViz-only use. -->
+      <render_engine>ogre</render_engine>
     </plugin>
 
     <light name="sun" type="directional">

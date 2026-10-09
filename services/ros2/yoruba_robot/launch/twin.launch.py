@@ -34,7 +34,7 @@ def generate_launch_description():
     gz_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory("ros_gz_sim"), "launch", "gz_sim.launch.py")),
-        launch_arguments={"gz_args": f"-r -v 2 {world}"}.items())
+        launch_arguments={"gz_args": f"-r -v 2 --render-engine-gui ogre {world}"}.items())
 
     rsp = Node(package="robot_state_publisher", executable="robot_state_publisher",
                parameters=[robot_description], output="screen")

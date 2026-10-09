@@ -7,8 +7,9 @@ import unittest
 
 from services.ros2.yoruba_robot.yoruba_robot.kinematics import (
     FORWARD, BACKWARD, LEFT, RIGHT, STOP, OdomState, RobotSpec,
-    advance_wheel_angles, command_to_wheels, integrate, quaternion_from_yaw,
-    twist_to_command, _wrap)
+    advance_wheel_angles, command_to_wheels, duties_to_wheels, duty_to_fraction,
+    fraction_to_speed, integrate, motion_source, quaternion_from_yaw, speed_to_duty,
+    speed_to_fraction, twist_to_command, _wrap)
 
 
 SPEC = RobotSpec()
@@ -25,11 +26,21 @@ class TestTwistToCommand(unittest.TestCase):
         cmd, s = twist_to_command(-SPEC.max_linear, 0, SPEC)
         self.assertEqual((cmd, s), (BACKWARD, 255))
 
-    def test_slow_still_above_min_duty(self):
-        """A tiny Twist must not come out below MIN_DUTY — the wheels would
-        just hum. Matches the firmware's speedToDuty."""
+    def test_slow_still_turns_the_wheels(self):
+        """A tiny Twist becomes a small firmware speed, which the firmware maps
+        to a duty at or above MIN_DUTY: the wheels turn instead of humming."""
         _, s = twist_to_command(0.05, 0, SPEC)
-        self.assertGreaterEqual(s, SPEC.min_duty)
+        self.assertGreaterEqual(s, 1)
+        self.assertGreaterEqual(speed_to_duty(s, SPEC.min_duty), SPEC.min_duty)
+
+    def test_speed_is_not_mapped_twice(self):
+        """Regression: the bridge used to send a DUTY (90-255) as the firmware
+        SPEED, and the firmware mapped it to duty again, so 'slow' ran fast.
+        A Twist at 40% of top speed must reach the motors at 40% of the
+        usable duty range."""
+        _, s = twist_to_command(0.4 * SPEC.max_linear, 0, SPEC)
+        duty = speed_to_duty(s, SPEC.min_duty)
+        self.assertAlmostEqual(duty_to_fraction(duty, SPEC.min_duty), 0.4, delta=0.01)
 
     def test_turns_use_rep103_sign(self):
         """+wz = CCW = turn LEFT. If this flips, the robot drives mirror-image
@@ -127,6 +138,81 @@ class TestQuaternion(unittest.TestCase):
         self.assertAlmostEqual(_wrap(3 * math.pi), math.pi)
         self.assertAlmostEqual(_wrap(-3 * math.pi), math.pi)
         self.assertAlmostEqual(_wrap(0.5), 0.5)
+
+
+class TestFirmwareMapping(unittest.TestCase):
+    def test_speed_to_duty_matches_firmware(self):
+        """Same values as firmware/esp32s3_robot/tests/test_motor_math.cpp."""
+        self.assertEqual(speed_to_duty(0, 90), 0)
+        self.assertEqual(speed_to_duty(1, 90), 90)
+        self.assertEqual(speed_to_duty(255, 90), 255)
+        self.assertEqual(speed_to_duty(999, 90), 255)
+        self.assertEqual(speed_to_duty(128, 0), 127)
+        self.assertEqual(speed_to_duty(200, 90), 90 + 199 * 165 // 254)
+
+    def test_fraction_speed_round_trip(self):
+        for f in (0.05, 0.25, 0.5, 0.9, 1.0):
+            self.assertAlmostEqual(speed_to_fraction(fraction_to_speed(f)), f, delta=0.003)
+        self.assertEqual(fraction_to_speed(0), 0)
+        self.assertEqual(speed_to_fraction(0), 0.0)
+
+    def test_duty_dead_zone_is_stopped(self):
+        self.assertEqual(duty_to_fraction(0, 90), 0.0)
+        self.assertEqual(duty_to_fraction(60, 90), 0.0)          # mid-ramp, can't turn
+        self.assertEqual(duty_to_fraction(-255, 90), 1.0)
+
+
+class TestTelemetryWheels(unittest.TestCase):
+    """Telemetry duties -> wheel speeds must agree with the command model, so
+    the twin doesn't jump when telemetry arrives."""
+
+    def test_forward_matches_command_model(self):
+        for speed in (60, 130, 200, 255):
+            d = speed_to_duty(speed, SPEC.min_duty)
+            vl, vr = duties_to_wheels(d, d, SPEC.min_duty, SPEC)
+            cl, cr = command_to_wheels(FORWARD, speed, SPEC)
+            self.assertAlmostEqual(vl, cl, delta=0.003)
+            self.assertAlmostEqual(vr, cr, delta=0.003)
+
+    def test_spin_matches_command_model(self):
+        d = speed_to_duty(200, SPEC.min_duty)
+        vl, vr = duties_to_wheels(-d, d, SPEC.min_duty, SPEC)
+        cl, cr = command_to_wheels(LEFT, 200, SPEC)
+        self.assertAlmostEqual(vl, cl, delta=0.003)
+        self.assertAlmostEqual(vr, cr, delta=0.003)
+
+    def test_stopped_and_backward(self):
+        self.assertEqual(duties_to_wheels(0, 0, 90, SPEC), (0.0, 0.0))
+        vl, vr = duties_to_wheels(-255, -255, 90, SPEC)
+        self.assertAlmostEqual(vl, -SPEC.max_linear)
+        self.assertAlmostEqual(vr, -SPEC.max_linear)
+
+
+class TestMotionSource(unittest.TestCase):
+    class T:
+        def __init__(self, dl, dr, md=90):
+            self.duty_left, self.duty_right, self.min_duty = dl, dr, md
+
+    def test_live_telemetry_wins_over_commands(self):
+        """The robot reports it is spinning even though THIS bridge commanded
+        nothing (someone else is driving): the twin must spin."""
+        (vl, vr), src = motion_source(self.T(-255, 255), 0.05, True, (0.0, 0.0), SPEC)
+        self.assertEqual(src, "telemetry")
+        self.assertLess(vl, 0)
+        self.assertGreater(vr, 0)
+
+    def test_telemetry_says_stopped_while_commanded_forward(self):
+        """Firmware watchdog/WiFi stop: commanded forward, motors at 0 -> 0."""
+        (vl, vr), src = motion_source(self.T(0, 0), 0.05, True, (0.3, 0.3), SPEC)
+        self.assertEqual((vl, vr, src), (0.0, 0.0, "telemetry"))
+
+    def test_stale_telemetry_means_stopped(self):
+        (vl, vr), src = motion_source(self.T(200, 200), 1.0, True, (0.3, 0.3), SPEC)
+        self.assertEqual((vl, vr, src), (0.0, 0.0, "telemetry-lost"))
+
+    def test_no_telemetry_ever_uses_commands(self):
+        (vl, vr), src = motion_source(None, float("inf"), False, (0.2, 0.2), SPEC)
+        self.assertEqual((vl, vr, src), (0.2, 0.2, "commands"))
 
 
 class TestWheelAngles(unittest.TestCase):

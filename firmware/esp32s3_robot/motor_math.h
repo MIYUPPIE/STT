@@ -5,6 +5,8 @@
 // the ENA/ENB enable pin.
 #pragma once
 
+#include <stdio.h>
+
 namespace motor {
 
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -69,6 +71,17 @@ inline int stepFor(int rampMs, int tickMs) {
   if (rampMs <= 0) return 0;                        // 0 = no ramp (instant)
   int s = 255 * tickMs / rampMs;
   return s < 1 ? 1 : s;
+}
+
+// Telemetry line the robot streams to subscribers (UDP 3334), 20 Hz:
+//   "T,<seq>,<ms>,<dutyL>,<dutyR>,<minDuty>\n"
+// dutyL/dutyR are the SIGNED PWM duties applied to the motors right now (after
+// trim and ramp; 0 = stopped). minDuty lets the laptop map duty -> speed even if
+// MIN_DUTY is re-tuned. Returns the length written (0 if it didn't fit).
+inline int formatTelemetry(char *buf, int n, unsigned long seq, unsigned long ms,
+                           int dutyL, int dutyR, int minDuty) {
+  int len = snprintf(buf, n, "T,%lu,%lu,%d,%d,%d\n", seq, ms, dutyL, dutyR, minDuty);
+  return (len > 0 && len < n) ? len : 0;
 }
 
 }  // namespace motor

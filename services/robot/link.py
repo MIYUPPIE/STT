@@ -28,7 +28,7 @@ class TcpTransport:
     RETRY_GAP = 1.0      # seconds between reconnect attempts after a failure
 
     def __init__(self, host, port=None, timeout=None, connect_timeout=None,
-                 connect=socket.create_connection):
+                 connect=socket.create_connection, connect_now=True):
         self.host = host
         self.tcp_port = config.TCP_PORT if port is None else port
         self.port = f"wifi {host}:{self.tcp_port}"
@@ -39,7 +39,15 @@ class TcpTransport:
         self.sock = None
         self._buf = b""
         self._last_fail = 0.0
-        self._connect()
+        # connect_now=False: don't take the robot's single command slot until
+        # the first send (the firmware drops its current client when a new one
+        # connects, and stops the motors).
+        if connect_now:
+            self._connect()
+
+    @property
+    def connected(self) -> bool:
+        return self.sock is not None
 
     def _connect(self):
         self.close()
@@ -194,13 +202,17 @@ def scan_subnet(prefix, probe_fn=probe, workers=128) -> str | None:
 
 
 def discover(mdns=resolve_mdns, probe_fn=probe, subnet=local_subnet,
-             scan=scan_subnet) -> tuple[str | None, str]:
+             scan=scan_subnet, verify_mdns=True) -> tuple[str | None, str]:
     """Find the board on the LAN. Returns (host, how) or (None, why-not).
-    Order: pinned ROBOT_HOST -> mDNS name -> /24 sweep."""
+    Order: pinned ROBOT_HOST -> mDNS name -> /24 sweep.
+
+    verify_mdns=False trusts the mDNS answer without a TCP probe. A probe is a
+    TCP connection, and connecting makes the firmware drop (and stop) whoever
+    is currently driving it, so an observer must not probe."""
     if config.HOST and config.HOST != "auto":
         return config.HOST, "ROBOT_HOST"
     ip = mdns()
-    if ip and probe_fn(ip):
+    if ip and (not verify_mdns or probe_fn(ip)):
         return ip, f"mDNS {config.MDNS_NAME}"
     prefix = subnet()
     if not prefix:
@@ -212,11 +224,13 @@ def discover(mdns=resolve_mdns, probe_fn=probe, subnet=local_subnet,
                   f"(is the laptop on the robot's WiFi?)")
 
 
-def open_tcp() -> TcpTransport:
-    host, how = discover()
+def open_tcp(lazy: bool = False) -> TcpTransport:
+    """lazy=True: find the robot without touching its command link (mDNS
+    trusted, no probe; connect on first send)."""
+    host, how = discover(verify_mdns=not lazy)
     if not host:
         raise RuntimeError(how)
-    t = TcpTransport(host)
+    t = TcpTransport(host, connect_now=not lazy)
     t.found_by = how
     return t
 
@@ -282,16 +296,17 @@ def open_serial() -> SerialTransport:
     return SerialTransport(port)
 
 
-def open_transport():
+def open_transport(lazy: bool = False):
     """Open the link ROBOT_LINK asks for. 'auto' = WiFi first, then USB serial.
-    Raises with every reason on failure."""
+    lazy=True (WiFi only) defers connecting until the first command. Raises
+    with every reason on failure."""
     mode = config.LINK
     if mode not in ("auto", "wifi", "serial"):
         raise RuntimeError(f"ROBOT_LINK={mode!r} (use auto, wifi or serial)")
     errors = []
     if mode in ("auto", "wifi"):
         try:
-            return open_tcp()
+            return open_tcp(lazy=lazy)
         except Exception as e:
             errors.append(f"wifi: {e}")
     if mode in ("auto", "serial"):

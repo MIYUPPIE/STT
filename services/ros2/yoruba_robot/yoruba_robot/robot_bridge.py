@@ -14,6 +14,7 @@
 import os
 import sys
 import threading
+import time
 
 import rclpy
 from geometry_msgs.msg import Twist, TransformStamped
@@ -34,9 +35,10 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 from services.robot.link import RobotLink, open_transport
+from services.robot.telemetry import TelemetryListener
 from .kinematics import (OdomState, RobotSpec, STOP, advance_wheel_angles,
-                         command_to_wheels, integrate, quaternion_from_yaw,
-                         twist_to_command)
+                         command_to_wheels, integrate, motion_source,
+                         quaternion_from_yaw, twist_to_command)
 
 
 class RobotBridge(Node):
@@ -60,6 +62,13 @@ class RobotBridge(Node):
         # commands alone. Use it to rehearse in RViz with the robot on the desk.
         self.declare_parameter("drive_real", True)
         self.declare_parameter("min_duty", RobotSpec.min_duty)   # firmware MIN_DUTY
+        # Follow the robot's own motor report (UDP telemetry) instead of our
+        # commands: RViz and Gazebo then show what the motors really do, even
+        # when something else (live_caption --robot, USB, watchdog) drives it.
+        self.declare_parameter("use_telemetry", True)
+        # Hand the robot's single command slot back after this long without
+        # sending, so another controller (live_caption --robot) can drive.
+        self.declare_parameter("idle_release_s", 3.0)
 
         p = self.get_parameter
         self.spec = RobotSpec(
@@ -72,6 +81,9 @@ class RobotBridge(Node):
         self.base_frame = p("base_frame").value
         self.hold_ms = int(p("hold_ms").value)
         self.cmd_timeout = float(p("cmd_timeout").value)
+        self.use_telemetry = bool(p("use_telemetry").value)
+        self.idle_release_s = float(p("idle_release_s").value)
+        self.telemetry: TelemetryListener | None = None
 
         self.link: RobotLink | None = None
         self.link_lock = threading.Lock()
@@ -82,6 +94,9 @@ class RobotBridge(Node):
 
         self.state = OdomState()
         self.wheel_angles = (0.0, 0.0)                      # left, right (rad)
+        self.cmd_wheels = (0.0, 0.0)                        # from our own commands
+        self.source = None                                  # "telemetry" | ...
+        self.started = time.monotonic()            # wall clock: sim time may start at 0
         self.vl = 0.0
         self.vr = 0.0
         self.last_cmd = self.get_clock().now()
@@ -112,8 +127,14 @@ class RobotBridge(Node):
     # ---------------- link ----------------
     def _open_link(self, required):
         try:
-            self.link = RobotLink(open_transport())
+            # lazy: find the robot without connecting (connecting would drop
+            # and stop whoever is driving it); connect on our first command.
+            self.link = RobotLink(open_transport(lazy=True))
             self.get_logger().info(f"robot link: {self.link.port}")
+            host = getattr(self.link.transport, "host", None)
+            if self.use_telemetry and host:
+                self.telemetry = TelemetryListener(host)
+                self.get_logger().info(f"telemetry: subscribed to {host}:3334")
         except Exception as e:
             if required:
                 raise
@@ -136,7 +157,7 @@ class RobotBridge(Node):
         cmd, speed = twist_to_command(msg.linear.x, msg.angular.z, self.spec)
         now = self.get_clock().now()
         self.last_cmd = now
-        self.vl, self.vr = command_to_wheels(cmd, speed, self.spec)
+        self.cmd_wheels = command_to_wheels(cmd, speed, self.spec)
         if (cmd, speed) != self.current:                    # only resend on change
             self.current = (cmd, speed)
             self._send(cmd, speed)
@@ -154,8 +175,9 @@ class RobotBridge(Node):
         if (now - self.last_cmd).nanoseconds / 1e9 > self.cmd_timeout:
             if self.current != (STOP, 0):
                 self.current = (STOP, 0)
-                self.vl = self.vr = 0.0
+                self.cmd_wheels = (0.0, 0.0)
                 self._send(STOP, 0)
+                self.last_sent = now
 
         # Keepalive: resend the current move so the firmware's hold window never
         # lapses mid-command. Covers HOLD_REFRESH on the pure-Python side too.
@@ -163,6 +185,31 @@ class RobotBridge(Node):
            (now - self.last_sent).nanoseconds / 1e9 > self.hold_ms / 1000 * 0.4:
             self._send(*self.current)
             self.last_sent = now
+
+        # Idle: give the command slot back so another controller can drive.
+        tr = self.link.transport if self.link is not None else None
+        if tr is not None and getattr(tr, "connected", False) and \
+           self.current[0] == STOP and \
+           (now - self.last_sent).nanoseconds / 1e9 > self.idle_release_s:
+            with self.link_lock:
+                tr.close()
+
+        telem, age = (self.telemetry.latest() if self.telemetry is not None
+                      else (None, float("inf")))
+        ever = self.telemetry is not None and self.telemetry.ever
+        (self.vl, self.vr), source = motion_source(telem, age, ever,
+                                                   self.cmd_wheels, self.spec)
+        starting = (self.telemetry is not None and not ever and
+                    time.monotonic() - self.started < 2.0)
+        if source != self.source and not starting:
+            msg = {"telemetry": "following the robot's motor telemetry (live)",
+                   "telemetry-lost": "telemetry lost: showing the robot stopped "
+                                     "(firmware stops on link loss)",
+                   "commands": "no telemetry (old firmware?): dead reckoning "
+                               "from this bridge's commands"}[source]
+            (self.get_logger().warn if source != "telemetry" else
+             self.get_logger().info)(msg)
+            self.source = source
 
         self.state = integrate(self.state, self.vl, self.vr, dt, self.spec)
         self.wheel_angles = advance_wheel_angles(*self.wheel_angles, self.vl,
@@ -220,9 +267,16 @@ class RobotBridge(Node):
 
     def destroy_node(self):
         try:
+            if self.telemetry is not None:
+                self.telemetry.close()
             if self.link is not None:
                 with self.link_lock:
-                    self.link.move(STOP, 0, 0)              # always halt on exit
+                    # Halt on exit if WE were driving. If we are idle and not
+                    # connected, connecting just to send STOP would kick and
+                    # stop whoever else is driving the robot.
+                    tr = self.link.transport
+                    if self.current[0] != STOP or getattr(tr, "connected", True):
+                        self.link.move(STOP, 0, 0)
                     self.link.close()
         finally:
             super().destroy_node()

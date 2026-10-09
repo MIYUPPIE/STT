@@ -66,6 +66,19 @@ class TestSketchWiring(unittest.TestCase):
         self.assertIn("applyMotor(motorL, 0)", stop)
         self.assertIn("applyMotor(motorR, 0)", stop)
 
+    def test_telemetry_stream(self):
+        """The robot reports its applied motor duties on UDP 3334 (RViz follows
+        the real motors through this), using the host-tested formatter."""
+        self.assertEqual(self.d["TELEM_PORT"], "3334")
+        self.assertEqual(self.d["TELEM_MS"], "50")             # 20 Hz
+        self.assertIn("motor::formatTelemetry(", self.src)
+        self.assertIn("motorL.cur, motorR.cur, MIN_DUTY", self.src)
+        self.assertIn("serviceTelemetry();", self.src)
+
+    def test_ota_stops_motors(self):
+        self.assertIn("ArduinoOTA.handle()", self.src)
+        self.assertIn("ArduinoOTA.onStart([]() { stopMotors();", self.src)
+
     def test_tuning_in_range(self):
         self.assertTrue(0 <= int(self.d["MIN_DUTY"]) < 255)
         for k in ("LEFT_TRIM", "RIGHT_TRIM"):

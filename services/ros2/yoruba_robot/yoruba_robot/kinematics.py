@@ -31,50 +31,73 @@ class RobotSpec:
 
 def twist_to_command(linear: float, angular: float, spec: RobotSpec,
                      deadband: float = 0.02) -> tuple[str, int]:
-    """Twist (vx, wz) -> (direction, speed 0..255).
+    """Twist (vx, wz) -> (direction, firmware speed 1..255; 0 only for STOP).
 
-    A differential drive could in general mix linear + angular, but the firmware
-    only supports pure moves (forward/back + spin-in-place turns). So we snap to
-    whichever component dominates. Below `deadband` both ways means stop. speed
-    = 0 only for STOP; a direction with speed = 0 is nonsense."""
+    The firmware only does pure moves (forward/back, spin in place), so snap to
+    whichever component dominates. Below `deadband` both ways means stop.
+
+    The returned number is the firmware's *speed* argument ("F,<speed>,<ms>"),
+    NOT a PWM duty: the firmware itself maps speed onto MIN_DUTY..255
+    (motor::speedToDuty). Sending a duty here would map it twice."""
     la = abs(linear)
     aa = abs(angular)
     if la < deadband and aa < deadband:
         return STOP, 0
     if la >= aa * spec.wheel_separation / 2:                # linear wins
-        duty = _scale(la / spec.max_linear, spec)
-        return (FORWARD if linear > 0 else BACKWARD), duty
-    duty = _scale(aa / spec.max_angular, spec)
+        return (FORWARD if linear > 0 else BACKWARD), fraction_to_speed(la / spec.max_linear)
     # +wz = CCW = turn left (right wheel forward, left back) in REP-103.
-    return (LEFT if angular > 0 else RIGHT), duty
+    return (LEFT if angular > 0 else RIGHT), fraction_to_speed(aa / spec.max_angular)
 
 
-def _scale(frac: float, spec: RobotSpec) -> int:
-    """Clamp 0..1, then map onto min_duty..255 so slow commands still turn the
-    wheels (same shape as motor::speedToDuty on the firmware). Matches so a
-    0.1 m/s Twist produces the same floor speed as 'díẹ̀díẹ̀'."""
+def fraction_to_speed(frac: float) -> int:
+    """0..1 of top speed -> firmware speed 1..255 (0 for 0). Inverse of
+    speed_to_fraction: the firmware maps speed s to duty
+    MIN + (s-1)(255-MIN)/254, so the motor's fraction of its usable range is
+    exactly (s-1)/254."""
     frac = max(0.0, min(1.0, frac))
     if frac == 0.0:
         return 0
-    span = 255 - spec.min_duty
-    return spec.min_duty + round(frac * span)
+    return 1 + round(frac * 254)
+
+
+def speed_to_fraction(speed: int) -> float:
+    """Firmware speed 1..255 -> 0..1 of top speed (0 for speed <= 0)."""
+    if speed <= 0:
+        return 0.0
+    return (min(speed, 255) - 1) / 254
+
+
+def speed_to_duty(speed: int, min_duty: int) -> int:
+    """Mirror of firmware motor::speedToDuty (integer maths, same rounding)."""
+    if speed <= 0:
+        return 0
+    speed = min(255, max(1, speed))
+    min_duty = min(255, max(0, min_duty))
+    return min_duty + (speed - 1) * (255 - min_duty) // 254
+
+
+def duty_to_fraction(duty: int, min_duty: int) -> float:
+    """Applied PWM duty (from telemetry) -> 0..1 of top speed. Duties inside the
+    dead zone (0 < |duty| < MIN_DUTY, only seen mid-ramp) count as stopped."""
+    duty = abs(duty)
+    if duty < max(min_duty, 1) or min_duty >= 255:
+        return 0.0
+    return min(1.0, (duty - min_duty) / (255 - min_duty))
 
 
 def command_to_wheels(cmd: str, speed: int, spec: RobotSpec) -> tuple[float, float]:
-    """Firmware command -> commanded (v_left, v_right) in m/s. Used to drive the
-    odometry integrator so the bridge's /odom tracks what the robot was told to
-    do (dead reckoning; good enough for RViz + Gazebo match without encoders)."""
+    """Firmware command (direction, speed 1..255) -> (v_left, v_right) m/s.
+    Used for dead reckoning when telemetry from the robot isn't available."""
     if cmd == STOP or speed <= 0:
         return 0.0, 0.0
-    frac = _duty_to_fraction(speed, spec)
+    frac = speed_to_fraction(speed)
     if cmd == FORWARD:
         v = frac * spec.max_linear
         return v, v
     if cmd == BACKWARD:
         v = -frac * spec.max_linear
         return v, v
-    w = frac * spec.max_angular                             # rad/s intended
-    v_wheel = w * spec.wheel_separation / 2
+    v_wheel = frac * spec.max_angular * spec.wheel_separation / 2
     if cmd == LEFT:
         return -v_wheel, +v_wheel                           # CCW
     if cmd == RIGHT:
@@ -82,12 +105,24 @@ def command_to_wheels(cmd: str, speed: int, spec: RobotSpec) -> tuple[float, flo
     return 0.0, 0.0
 
 
-def _duty_to_fraction(duty: int, spec: RobotSpec) -> float:
-    """Inverse of _scale, so round-trips are stable."""
-    duty = max(0, min(255, duty))
-    if duty <= spec.min_duty:
-        return 0.0 if duty == 0 else 1.0 / (255 - spec.min_duty + 1)
-    return (duty - spec.min_duty) / (255 - spec.min_duty)
+def duties_to_wheels(duty_left: int, duty_right: int, min_duty: int,
+                     spec: RobotSpec) -> tuple[float, float]:
+    """The robot's ACTUAL signed motor duties (telemetry) -> (v_left, v_right).
+
+    Same-direction wheels roll at the calibrated straight-line speed
+    (max_linear). Opposite-direction wheels (spin in place) are scaled to the
+    calibrated spin rate (max_angular), because tyres scrub when spinning and
+    turn slower than they roll. A wheel on its own (the other stopped) uses the
+    straight-line figure."""
+    fl = duty_to_fraction(duty_left, min_duty)
+    fr = duty_to_fraction(duty_right, min_duty)
+    sl = (duty_left > 0) - (duty_left < 0)
+    sr = (duty_right > 0) - (duty_right < 0)
+    if sl and sr and sl != sr:
+        top = spec.max_angular * spec.wheel_separation / 2
+    else:
+        top = spec.max_linear
+    return sl * fl * top, sr * fr * top
 
 
 @dataclass
@@ -142,3 +177,28 @@ def advance_wheel_angles(left: float, right: float, v_left: float,
         return left, right
     return (_wrap(left + v_left / spec.wheel_radius * dt),
             _wrap(right + v_right / spec.wheel_radius * dt))
+
+
+TELEMETRY_FRESH_S = 0.3        # 6 missed 20 Hz samples = no longer live
+
+
+def motion_source(telemetry, age: float, telemetry_ever: bool,
+                  commanded: tuple[float, float], spec: RobotSpec,
+                  fresh: float = TELEMETRY_FRESH_S
+                  ) -> tuple[tuple[float, float], str]:
+    """Which wheel speeds the twin should show, and why.
+
+    1. "telemetry": the robot is reporting its applied motor duties -> use them.
+       This is what the motors are really doing, whoever commands them.
+    2. "telemetry-lost": telemetry was flowing and stopped. The firmware stops
+       the motors when WiFi or the command link drops, so show it stopped
+       rather than coasting on a stale command.
+    3. "commands": no telemetry ever (older firmware): dead-reckon from what
+       this bridge commanded.
+    """
+    if telemetry is not None and age <= fresh:
+        return duties_to_wheels(telemetry.duty_left, telemetry.duty_right,
+                                telemetry.min_duty, spec), "telemetry"
+    if telemetry_ever:
+        return (0.0, 0.0), "telemetry-lost"
+    return commanded, "commands"

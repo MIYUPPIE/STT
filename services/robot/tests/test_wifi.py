@@ -179,6 +179,25 @@ class TestDiscovery(unittest.TestCase):
         self.assertIsNone(resolve_mdns(run=missing))
         self.assertIsNone(resolve_mdns(run=hangs))
 
+    def test_observer_trusts_mdns_without_probing(self):
+        """verify_mdns=False must not open a TCP connection to the robot: that
+        would kick (and stop) whoever is driving it."""
+        with mock.patch.object(config, "HOST", "auto"):
+            host, how = discover(mdns=lambda: "192.168.1.197",
+                                 probe_fn=lambda h: self.fail("probed the robot"),
+                                 verify_mdns=False)
+        self.assertEqual(host, "192.168.1.197")
+
+    def test_lazy_transport_connects_on_first_send(self):
+        t = TcpTransport(self.sim.host, self.sim.port, timeout=0.5,
+                         connect_timeout=0.5, connect_now=False)
+        time.sleep(0.05)
+        self.assertEqual(self.sim.connects, 0)
+        self.assertFalse(t.connected)
+        self.assertEqual(t.send("P"), "PONG")
+        self.assertEqual(self.sim.connects, 1)
+        t.close()
+
     def test_scan_subnet_finds_one(self):
         self.assertEqual(scan_subnet("10.0.0", probe_fn=lambda h: h == "10.0.0.42"),
                          "10.0.0.42")

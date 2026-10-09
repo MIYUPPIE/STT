@@ -19,7 +19,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from .kinematics import (BACKWARD, FORWARD, LEFT, RIGHT, STOP, RobotSpec,
-                         WIRE_TO_ACTION)
+                         WIRE_TO_ACTION, speed_to_fraction)
 
 
 def line_to_twist(line: str, spec: RobotSpec) -> Twist | None:
@@ -36,8 +36,7 @@ def line_to_twist(line: str, spec: RobotSpec) -> Twist | None:
     speed = max(0, min(255, speed))
     if cmd == STOP or speed == 0:
         return Twist()
-    frac = (speed - spec.min_duty) / max(1, 255 - spec.min_duty) if speed > spec.min_duty else 0.1
-    frac = max(0.0, min(1.0, frac))
+    frac = speed_to_fraction(speed)                    # firmware speed, not duty
     t = Twist()
     if cmd == FORWARD:
         t.linear.x = frac * spec.max_linear

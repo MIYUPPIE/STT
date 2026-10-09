@@ -179,6 +179,7 @@ python3 -m unittest services.robot.tests.test_robot \
                     services.robot.tests.test_wifi \
                     services.robot.tests.test_firmware \
                     services.robot.tests.test_ros_sink \
+                    services.robot.tests.test_telemetry \
                     services.stt.tests.test_stt \
                     services.servo.tests.test_servo \
                     services.tts.tests.test_tts \
@@ -189,10 +190,11 @@ python3 -m unittest services.robot.tests.test_robot \
                     services.ros2.yoruba_robot.test.test_description
 ```
 
-224 tests pass (214 here + 10 ROS-message tests run under system Python); this covers:
+247 tests pass (237 here + 10 ROS-message tests run under system Python); this covers:
 - STT model resolution + offline build from the HF cache
 - Yoruba parser (fuzzy autocorrect, negations, split words, speed words)
-- WiFi link (TCP transport, mDNS, LAN sweep, reconnect on drops)
+- WiFi link (TCP transport, mDNS, LAN sweep, reconnect on drops, lazy connect)
+- Robot motor telemetry (UDP 3334) and RViz following the real motors
 - Firmware wiring guard + host C++ test of the ENA/ENB speed math
 - ROS line relay (reconnect, fail-fast)
 - ROS kinematics (Twist↔F/B/L/R, dead-reckoning odometry including spin-no-drift, wheel angles)

@@ -9,6 +9,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.substitutions import Command
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -17,7 +18,8 @@ def generate_launch_description():
     rviz_cfg = os.path.join(pkg, "config", "robot.rviz")
 
     robot_description = {
-        "robot_description": Command(["xacro ", urdf, " use_sim:=false"])
+        "robot_description": ParameterValue(
+            Command(["xacro ", urdf, " use_sim:=false"]), value_type=str)
     }
 
     rsp = Node(package="robot_state_publisher", executable="robot_state_publisher",

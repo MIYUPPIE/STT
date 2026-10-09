@@ -12,6 +12,7 @@ from launch.actions import ExecuteProcess, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -22,8 +23,11 @@ def generate_launch_description():
 
     # xacro produces the URDF XML string; feed it both to RSP (for RViz /tf) and
     # to Gazebo's /world/.../create as the model to spawn.
+    # ParameterValue(..., value_type=str): xacro returns URDF XML; without
+    # this Jazzy tries to YAML-parse it and fails.
     robot_description = {
-        "robot_description": Command(["xacro ", urdf, " use_sim:=true"])
+        "robot_description": ParameterValue(
+            Command(["xacro ", urdf, " use_sim:=true"]), value_type=str)
     }
 
     gz_launch = IncludeLaunchDescription(

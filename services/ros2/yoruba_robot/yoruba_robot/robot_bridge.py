@@ -42,7 +42,11 @@ class RobotBridge(Node):
     def __init__(self):
         super().__init__("robot_bridge")
         self.declare_parameter("odom_frame", "odom")
-        self.declare_parameter("base_frame", "base_link")
+        # Publish TF to base_footprint (URDF root), not base_link. base_link is
+        # a child of base_footprint via a fixed joint published by RSP; if we
+        # also parented base_link from odom, it would have two TF parents and
+        # the model would never resolve in RViz.
+        self.declare_parameter("base_frame", "base_footprint")
         self.declare_parameter("publish_rate", 50.0)        # Hz, odom + TF
         self.declare_parameter("cmd_timeout", 0.5)          # s before auto-stop
         self.declare_parameter("hold_ms", 1000)             # firmware move window

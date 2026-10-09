@@ -18,6 +18,7 @@ import threading
 import rclpy
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import JointState
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from tf2_ros import TransformBroadcaster
@@ -32,10 +33,10 @@ _REPO = os.environ.get("YORUBA_ROBOT_REPO") or os.path.abspath(
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from services.robot import config as robot_cfg
 from services.robot.link import RobotLink, open_transport
-from .kinematics import (OdomState, RobotSpec, STOP, command_to_wheels,
-                         integrate, quaternion_from_yaw, twist_to_command)
+from .kinematics import (OdomState, RobotSpec, STOP, advance_wheel_angles,
+                         command_to_wheels, integrate, quaternion_from_yaw,
+                         twist_to_command)
 
 
 class RobotBridge(Node):
@@ -55,6 +56,10 @@ class RobotBridge(Node):
         self.declare_parameter("max_linear", RobotSpec.max_linear)
         self.declare_parameter("max_angular", RobotSpec.max_angular)
         self.declare_parameter("require_robot", False)      # True = fail if no link
+        # False = never open the ESP32 link: odom/TF/joint_states come from the
+        # commands alone. Use it to rehearse in RViz with the robot on the desk.
+        self.declare_parameter("drive_real", True)
+        self.declare_parameter("min_duty", RobotSpec.min_duty)   # firmware MIN_DUTY
 
         p = self.get_parameter
         self.spec = RobotSpec(
@@ -62,7 +67,7 @@ class RobotBridge(Node):
             wheel_separation=p("wheel_separation").value,
             max_linear=p("max_linear").value,
             max_angular=p("max_angular").value,
-            min_duty=robot_cfg.DEFAULT_SPEED and 90)        # firmware MIN_DUTY
+            min_duty=int(p("min_duty").value))
         self.odom_frame = p("odom_frame").value
         self.base_frame = p("base_frame").value
         self.hold_ms = int(p("hold_ms").value)
@@ -70,9 +75,13 @@ class RobotBridge(Node):
 
         self.link: RobotLink | None = None
         self.link_lock = threading.Lock()
-        self._open_link(required=p("require_robot").value)
+        if p("drive_real").value:
+            self._open_link(required=p("require_robot").value)
+        else:
+            self.get_logger().info("drive_real:=false - ESP32 link not opened")
 
         self.state = OdomState()
+        self.wheel_angles = (0.0, 0.0)                      # left, right (rad)
         self.vl = 0.0
         self.vr = 0.0
         self.last_cmd = self.get_clock().now()
@@ -83,6 +92,14 @@ class RobotBridge(Node):
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(Twist, "cmd_vel", self.on_cmd_vel, qos)
         self.odom_pub = self.create_publisher(Odometry, "odom", qos)
+        # Wheel angles for robot_state_publisher: without them the continuous
+        # wheel joints have no transform and RViz marks the RobotModel red.
+        self.joint_pub = self.create_publisher(JointState, "joint_states", qos)
+        # The command the real robot is ACTUALLY executing: snapped to the
+        # firmware's F/B/L/R moves and duty steps, zero after cmd_timeout.
+        # Gazebo drives from this (not raw /cmd_vel), so the twin does exactly
+        # what the real robot does, including stopping when commands go quiet.
+        self.applied_pub = self.create_publisher(Twist, "cmd_vel_applied", qos)
         self.tf = TransformBroadcaster(self)
         self.create_timer(1.0 / p("publish_rate").value, self.on_tick)
 
@@ -148,7 +165,14 @@ class RobotBridge(Node):
             self.last_sent = now
 
         self.state = integrate(self.state, self.vl, self.vr, dt, self.spec)
+        self.wheel_angles = advance_wheel_angles(*self.wheel_angles, self.vl,
+                                                 self.vr, dt, self.spec)
         self._publish_odom(now)
+        self._publish_joints(now)
+        applied = Twist()
+        applied.linear.x = (self.vl + self.vr) / 2
+        applied.angular.z = (self.vr - self.vl) / self.spec.wheel_separation
+        self.applied_pub.publish(applied)
 
     def _publish_odom(self, now):
         s = self.state
@@ -184,6 +208,15 @@ class RobotBridge(Node):
         tf.transform.rotation.z = qz
         tf.transform.rotation.w = qw
         self.tf.sendTransform(tf)
+
+    def _publish_joints(self, now):
+        js = JointState()
+        js.header.stamp = now.to_msg()
+        js.name = ["left_wheel_joint", "right_wheel_joint"]
+        js.position = list(self.wheel_angles)
+        r = self.spec.wheel_radius
+        js.velocity = [self.vl / r, self.vr / r]
+        self.joint_pub.publish(js)
 
     def destroy_node(self):
         try:

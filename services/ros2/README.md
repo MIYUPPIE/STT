@@ -1,138 +1,125 @@
-# services/ros2
+# services/ros2 — `yoruba_robot` digital twin
 
-ROS2 digital twin of the Yoruba voice-controlled 2-wheel robot. Same voice drives
-the real ESP32 (over WiFi) and the Gazebo model at the same time; RViz shows both.
+The ROS 2 Jazzy package that puts the Yoruba voice robot in RViz and Gazebo.
+One `/cmd_vel` drives the real ESP32 robot over WiFi; Gazebo runs an identical
+copy on exactly the command the real robot executes; RViz draws both robots
+inside the same arena.
+
+Step-by-step build guide (hardware to digital twin): **[docs/TUTORIAL.md](../../docs/TUTORIAL.md)**.
+
+![robot model](../../docs/img/robot_model.png)
+
+## Data flow
 
 ```
-Yoruba speech ─► live_caption.py --ros ─► TCP :7447 ─► voice_relay ─► /cmd_vel
-    (conda py3.13: STT + VAD)             (localhost)   (ROS2 py3.12)      │
-                                                                           ├──► gz-sim DiffDrive ─► sim robot (RViz)
-                                                                           └──► robot_bridge ─► ESP32 WiFi ─► real robot
-                                                                                      └─► /odom + TF ─► RViz
+live_caption.py --ros ──TCP :7447──► voice_relay ──► /cmd_vel ◄── teleop_twist_keyboard
+                                                        │
+                                                   robot_bridge
+                       ┌────────────────────────────────┼─────────────────────────────┐
+                       ▼                                ▼                             ▼
+               ESP32 over WiFi                 /odom, /tf (odom→base_footprint)  /cmd_vel_applied
+               (F/B/L/R/S lines)               /joint_states (wheel angles)          │
+                                                        │                            ▼
+                                               robot_state_publisher           Gazebo DiffDrive
+                                               (/robot_description)            /sim_odom, /sim_tf→/tf
+                                                        │                      /sim/joint_states
+                                                        ▼                            │
+                                               RViz: solid "Real robot"       sim robot_state_publisher
+                                                                              (/sim/robot_description)
+                                                                                     ▼
+                                                                         RViz: see-through "Gazebo twin"
 ```
 
-**Why the TCP relay.** ROS2 Jazzy's `rclpy` is bound to system Python 3.12;
-faster-whisper lives in conda Python 3.13. Instead of fighting that, each
-process stays in its own env and talks over the firmware's own five-letter line
-protocol (`F,200\n` / `S\n`). One contract spans both borders.
+`robot_bridge` is the single place where a Twist becomes a robot command: it
+snaps to the firmware's forward/back/spin moves and duty steps, and stops after
+0.5 s without commands. Gazebo is fed that shaped command (`/cmd_vel_applied`),
+so the sim reproduces the real robot's behaviour. Verified: 3 s forward = 0.500 m
+real (dead reckoning) vs 0.495 m sim; a spin = 2.801 vs 2.750 rad.
 
-## Package: `yoruba_robot`
+## TF tree
 
-Lives under `services/ros2/yoruba_robot/` (source of truth) and is symlinked
-into `~/ros2_ws/src/yoruba_robot` so `colcon build` finds it. `--symlink-install`
-keeps edits live without rebuilds.
+```
+odom ─┬─ base_footprint ── base_link ─┬─ chassis_plate, left/right_motor, caster_wheel
+      │  (robot_bridge)                ├─ battery, motor_driver, controller
+      │                                └─ left_wheel, right_wheel   (from /joint_states)
+      └─ sim_base_footprint ── sim_base_link ── sim_* (same parts)
+         (Gazebo DiffDrive)                    (from /sim/joint_states)
+```
 
-| File | Role |
+## Files
+
+| Path | What it is |
 |---|---|
-| `yoruba_robot/kinematics.py` | pure math: Twist↔F/B/L/R, dead-reckoning odometry integration, yaw→quaternion. Host-tested, no ROS. |
-| `yoruba_robot/robot_bridge.py` | ROS2 node. Subscribes `/cmd_vel`, drives the ESP32 (`services.robot.link.TcpTransport`), publishes `/odom` + `odom→base_link` TF. |
-| `yoruba_robot/voice_relay.py` | ROS2 node. Listens on 127.0.0.1:7447, turns each `F,200\n` line into a `/cmd_vel` Twist. |
-| `description/robot.urdf.xacro` | Shared URDF for Gazebo + RViz. Includes the `gz-sim-diff-drive-system` plugin so the sim subscribes to the same `/cmd_vel`. |
-| `worlds/empty.sdf` | Minimal Gazebo world (ground + sun). |
-| `config/robot.rviz` | RViz layout: Grid, RobotModel, TF, two Odometry trails (green = real dead reckoning, orange = sim ground truth). |
-| `launch/sim.launch.py` | Gazebo + RSP + RViz + ros_gz bridge. Simulation only. |
-| `launch/real.launch.py` | `robot_bridge` + RSP + RViz. Real hardware only. |
-| `launch/twin.launch.py` | **Digital twin**: everything, real + sim on one `/cmd_vel`. |
-
-## Build
-
-Once per machine:
-
-```bash
-ln -sfn /home/okhub/Documents/PROJECTS/STT/services/ros2/yoruba_robot \
-        /home/okhub/ros2_ws/src/yoruba_robot
-cd /home/okhub/ros2_ws
-source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install --packages-select yoruba_robot
-source install/setup.bash
-```
+| `description/robot.urdf.xacro` | The robot: flat acrylic plate, 2 TT motors + 65 mm wheels, rear ball caster, battery, L298N, ESP32-S3. Args `prefix` (link-name prefix) and `use_sim` (Gazebo plugins). |
+| `yoruba_robot/arena.py` | The environment, defined once: 3 x 3 m walled floor + 3 obstacles. Generates the Gazebo world and the RViz markers. |
+| `worlds/arena.sdf` | Generated from `arena.py` (`python3 -m yoruba_robot.arena > worlds/arena.sdf`). A test fails if it drifts. |
+| `yoruba_robot/robot_bridge.py` | `/cmd_vel` → ESP32 + `/odom`, TF, `/joint_states`, `/cmd_vel_applied`. |
+| `yoruba_robot/voice_relay.py` | TCP :7447 line protocol (`F,200`) → `/cmd_vel`. Bridges conda Python (STT) to ROS Python. |
+| `yoruba_robot/environment_publisher.py` | `arena.py` → `/environment` MarkerArray (latched). |
+| `yoruba_robot/kinematics.py` | Pure math: Twist↔F/B/L/R, odometry, wheel angles. `RobotSpec` holds the calibrated robot constants. |
+| `yoruba_robot/launch_common.py` | Shared launch building blocks. |
+| `launch/{sim,real,twin}.launch.py` | The three modes. |
+| `config/{sim,real,twin}.rviz` | RViz layouts, generated by `tools/make_rviz.py`. |
+| `tools/render_urdf.py`, `tools/render_arena.py` | Draw the robot / arena to PNG without ROS or a GPU. |
 
 ## Run
 
-Each terminal first: `source /opt/ros/jazzy/setup.bash && source ~/ros2_ws/install/setup.bash`.
+Every terminal: `source /opt/ros/jazzy/setup.bash && source ~/ros2_ws/install/setup.bash`
 
-### Sim only (no hardware)
+| Command | What starts |
+|---|---|
+| `ros2 launch yoruba_robot sim.launch.py` | Gazebo twin only. Real robot untouched. |
+| `ros2 launch yoruba_robot real.launch.py` | Real robot only (no Gazebo). |
+| `ros2 launch yoruba_robot twin.launch.py` | Both, side by side. |
 
-```bash
-ros2 launch yoruba_robot sim.launch.py
-# in another terminal:
-ros2 run teleop_twist_keyboard teleop_twist_keyboard   # drive the sim robot
-```
+Arguments: `gui:=true` (also open the Gazebo window), `voice:=false` (don't
+start voice_relay), `drive_real:=false` (never open the ESP32 link; the
+default for `sim`).
 
-### Real robot only (no Gazebo)
-
-```bash
-ros2 launch yoruba_robot real.launch.py
-ros2 run teleop_twist_keyboard teleop_twist_keyboard
-```
-
-### Digital twin (real + sim, one voice)
-
-```bash
-# shell 1: Gazebo + robot_bridge + RViz
-ros2 launch yoruba_robot twin.launch.py
-
-# shell 2: voice_relay (bridges live_caption.py -> /cmd_vel)
-ros2 run yoruba_robot voice_relay
-
-# shell 3: Yoruba STT publishing to the relay (conda py3.13)
-/home/okhub/anaconda3/bin/python live_caption.py --cpu --ros --speak
-```
-
-Say `síwájú` / `sẹ́yìn` / `òsì` / `ọ̀tún` / `dúró`. The real robot moves; the
-Gazebo robot moves in lockstep; RViz shows both odometries (green trail is the
-real robot's dead reckoning, orange is the sim's ground truth — any divergence
-is calibration drift to fix).
+Then drive with your voice (`/home/okhub/anaconda3/bin/python live_caption.py --cpu --ros --speak`)
+or the keyboard (`ros2 run teleop_twist_keyboard teleop_twist_keyboard`).
 
 ## Topics
 
-| Topic | From | Note |
+| Topic | Type | Publisher |
 |---|---|---|
-| `/cmd_vel` (geometry_msgs/Twist) | voice_relay or teleop | subscribed by Gazebo + robot_bridge |
-| `/odom` (nav_msgs/Odometry) | robot_bridge | real-robot dead reckoning from commanded speeds |
-| `/sim_odom` (nav_msgs/Odometry) | Gazebo via ros_gz_bridge | sim ground truth |
-| `/tf` | robot_bridge | `odom → base_link` |
-| `/joint_states` | Gazebo | wheel positions for `robot_state_publisher` → RViz |
-| `/clock` | Gazebo | use_sim_time |
+| `/cmd_vel` | Twist | voice_relay, teleop |
+| `/cmd_vel_applied` | Twist | robot_bridge (what the robot executes; drives Gazebo) |
+| `/odom` | Odometry | robot_bridge (dead reckoning) |
+| `/joint_states` | JointState | robot_bridge |
+| `/robot_description` | String (latched) | robot_state_publisher |
+| `/sim_odom` | Odometry | Gazebo |
+| `/sim/joint_states` | JointState | Gazebo |
+| `/sim/robot_description` | String (latched) | sim robot_state_publisher |
+| `/environment` | MarkerArray (latched) | environment_publisher |
+| `/tf`, `/tf_static`, `/clock` | | robot_bridge, RSPs, Gazebo |
 
-## Config (`robot_bridge` ROS parameters)
+## robot_bridge parameters
 
 | Param | Default | Meaning |
 |---|---|---|
-| `require_robot` | `false` | fail-start if the ESP32 can't be reached |
-| `publish_rate` | `50.0` Hz | odom + TF rate |
-| `cmd_timeout` | `0.5` s | auto-stop if `/cmd_vel` goes quiet |
-| `hold_ms` | `1000` ms | firmware move-window per command (keepalive matches) |
-| `wheel_radius` / `wheel_separation` | `0.0325` / `0.15` m | override to match your chassis |
-| `max_linear` / `max_angular` | `0.35` m/s / `3.5` rad/s | floor-measured max to map Twist→speed |
-
-`voice_relay` takes `host` (default `127.0.0.1`) and `port` (`7447`).
+| `drive_real` | `true` | `false` = never open the ESP32 link |
+| `require_robot` | `false` | `true` = exit if the ESP32 can't be reached |
+| `cmd_timeout` | `0.5` s | stop when `/cmd_vel` goes quiet |
+| `hold_ms` | `1000` | firmware move window per command |
+| `publish_rate` | `50` Hz | odom / TF / joint_states rate |
+| `wheel_radius`, `wheel_separation` | `0.0325`, `0.15` m | must equal the URDF (gate-tested via `RobotSpec`) |
+| `max_linear`, `max_angular` | `0.35` m/s, `3.5` rad/s | measured top speeds (calibrate: tutorial §13) |
+| `min_duty` | `90` | firmware `MIN_DUTY` |
 
 ## Tests
 
-**Gate (free, no ROS runtime, <1s):**
-
 ```bash
-python3 -m unittest services.ros2.yoruba_robot.test.test_kinematics -v
-python3 -m unittest services.robot.tests.test_ros_sink -v
+# from the repo root, any Python (no ROS needed except test_description, which shells out to xacro)
+python3 -m unittest services.ros2.yoruba_robot.test.test_kinematics \
+                    services.ros2.yoruba_robot.test.test_environment \
+                    services.ros2.yoruba_robot.test.test_description -v
+# ROS message tests (system Python, ROS sourced)
+cd services/ros2/yoruba_robot && python3 -m pytest test/test_markers.py test/test_voice_relay.py
 ```
 
-Covers the ↔ Twist math, dead-reckoning odometry (straight line, spin-in-place
-no-drift, arc, yaw wrapping), the `line_to_twist` parser (REP-103 sign
-convention), the live_caption → relay TCP sink (connect, send, reconnect on
-peer drop, fail-fast while relay is down).
-
-**Via colcon (same tests, plus the ROS-dependent `test_voice_relay`):**
-
-```bash
-cd ~/ros2_ws && colcon test --packages-select yoruba_robot && colcon test-result --verbose
-```
-
-## Verified real end-to-end
-
-With both nodes running and the real robot powered on:
-- `robot_bridge` discovered the ESP32 at `wifi 192.168.1.197:3333` on its own
-  (mDNS/sweep), and the "voice→relay→cmd_vel→robot_bridge→ESP32" chain carried
-  F,200 and L,200 to real motion.
-- `/odom` published 447 samples during a 10 s window; a forward-then-left
-  sequence integrated cleanly from (0, 0, 0) to (0.117 m, 0 m, 1.17 rad).
+They cover the kinematics, wheel-angle integration, arena validity, world and
+RViz files staying in sync with their generators, URDF geometry (three ground
+contacts, wheels clear of the plate, sizes equal to `RobotSpec`, materials,
+inertias, sim prefix, Gazebo plugin wiring), the markers, and the voice line
+parser.

@@ -1,88 +1,36 @@
-# sim.launch.py — Gazebo physics (server) + robot_state_publisher + RViz. No
-# Gazebo client window by default: its Ogre renderer crashes on some NVIDIA +
-# Noble combos (observed here: driver 580 / RTX 2060 / Jazzy). The physics
-# server, DiffDrive plugin, bridges and RViz all work fine without the Gazebo
-# window — RViz is the visualizer either way.
+# sim.launch.py — Gazebo twin only (no hardware): arena world + simulated robot
+# + RViz showing the sim robot (sim_ frames) and the arena markers.
 #
-# ros2 launch yoruba_robot sim.launch.py             # server + RViz only
-# ros2 launch yoruba_robot sim.launch.py gui:=true   # also open Gazebo
-import os
-
-from ament_index_python.packages import get_package_share_directory
+# ros2 launch yoruba_robot sim.launch.py             # Gazebo server + RViz
+# ros2 launch yoruba_robot sim.launch.py gui:=true   # also the Gazebo window
+# ros2 launch yoruba_robot sim.launch.py voice:=false
+# Drive: ros2 run teleop_twist_keyboard teleop_twist_keyboard
+#   or:  live_caption.py --ros --cpu --speak   (voice_relay is started here)
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
-                            IncludeLaunchDescription,
-                            SetEnvironmentVariable)
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration, PythonExpression
-from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+
+from yoruba_robot import launch_common as lc
 
 
 def generate_launch_description():
-    pkg = get_package_share_directory("yoruba_robot")
-    urdf = os.path.join(pkg, "description", "robot.urdf.xacro")
-    world = os.path.join(pkg, "worlds", "empty.sdf")
-    rviz_cfg = os.path.join(pkg, "config", "robot.rviz")
-
     gui = LaunchConfiguration("gui")
-    # -s = server only; drop -s to also start the client window. GUI engine kept
-    # on Ogre1 for the (rare) case the Gazebo client does open on this box.
-    gz_args = PythonExpression([
-        "'-r -v 2 --render-engine-gui ogre ", world, "' if '", gui,
-        "' == 'true' else '-r -s -v 2 ", world, "'"])
-
-    # ParameterValue(..., value_type=str): xacro returns URDF XML; without this
-    # Jazzy YAML-parses it and the launch fails.
-    robot_description = {
-        "robot_description": ParameterValue(
-            Command(["xacro ", urdf, " use_sim:=true"]), value_type=str)
-    }
-
-    gz_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(
-            get_package_share_directory("ros_gz_sim"), "launch", "gz_sim.launch.py")),
-        launch_arguments={"gz_args": gz_args}.items())
-
-    rsp = Node(package="robot_state_publisher", executable="robot_state_publisher",
-               parameters=[robot_description, {"use_sim_time": True}],
-               output="screen")
-
-    spawn = Node(package="ros_gz_sim", executable="create",
-                 arguments=["-topic", "robot_description",
-                            "-name", "yoruba_robot",
-                            "-x", "0", "-y", "0", "-z", "0.03"],
-                 output="screen")
-
-    bridge = Node(package="ros_gz_bridge", executable="parameter_bridge",
-                  arguments=[
-                      "/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist",
-                      "/sim_odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
-                      "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
-                      "/world/yoruba/model/yoruba_robot/joint_state@"
-                      "sensor_msgs/msg/JointState[gz.msgs.Model"],
-                  remappings=[("/world/yoruba/model/yoruba_robot/joint_state",
-                               "/joint_states")],
-                  parameters=[{"use_sim_time": True}],
-                  output="screen")
-
-    rviz = Node(package="rviz2", executable="rviz2", arguments=["-d", rviz_cfg],
-                parameters=[{"use_sim_time": True}], output="log")
-
-    hint = ExecuteProcess(
-        cmd=["bash", "-c",
-             "echo; echo '--- drive the sim:'; "
-             "echo '  ros2 run teleop_twist_keyboard teleop_twist_keyboard'; echo"],
-        output="screen")
-
+    voice = LaunchConfiguration("voice")
+    drive_real = LaunchConfiguration("drive_real")
     return LaunchDescription([
-        # Wayland sessions: Qt would open a Wayland surface Ogre's GLX can't
-        # attach to ('Invalid parentWindowHandle'). xcb routes through
-        # Xwayland, which Ogre speaks fluently. No-op on pure X11 sessions.
-        SetEnvironmentVariable('QT_QPA_PLATFORM', 'xcb'),
+        DeclareLaunchArgument("drive_real", default_value="false",
+                              description="Sim only by default; true also drives the ESP32."),
         DeclareLaunchArgument("gui", default_value="false",
-                              description="Also open the Gazebo client window "
-                              "(crashes on some NVIDIA+Noble combos; RViz "
-                              "shows the robot either way)."),
-        gz_launch, rsp, spawn, bridge, rviz, hint,
+                              description="Also open the Gazebo client window."),
+        DeclareLaunchArgument("voice", default_value="true",
+                              description="Start voice_relay (TCP :7447 -> /cmd_vel)."),
+        lc.qt_on_x11(),
+        *lc.gazebo(gui),
+        lc.sim_state_publisher(),
+        # robot_bridge with the ESP32 link closed: it shapes /cmd_vel into the
+        # exact command the real robot would run and feeds Gazebo with it.
+        lc.robot_bridge(use_sim_time=True, drive_real=drive_real),
+        lc.environment(use_sim_time=True),
+        lc.voice_relay(voice),
+        lc.rviz("sim.rviz", use_sim_time=True),
     ])

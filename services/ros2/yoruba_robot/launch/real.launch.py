@@ -1,34 +1,29 @@
-# real.launch.py — real ESP32 (over WiFi) + RViz, no Gazebo. The robot_bridge
-# node drives the ESP32 and publishes odom+TF so RViz shows where it thinks it
-# is. Combine with teleop_twist_keyboard or voice_relay.
+# real.launch.py — the real ESP32 robot only (no Gazebo): robot_bridge drives it
+# over WiFi and publishes odom/TF/joint_states; RViz shows it in the arena.
 #
 # ros2 launch yoruba_robot real.launch.py
-import os
-
-from ament_index_python.packages import get_package_share_directory
+# ros2 launch yoruba_robot real.launch.py drive_real:=false   # rehearse, robot untouched
+# Drive: live_caption.py --ros --cpu --speak   (voice_relay is started here)
+#   or:  ros2 run teleop_twist_keyboard teleop_twist_keyboard
 from launch import LaunchDescription
-from launch.substitutions import Command
-from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+
+from yoruba_robot import launch_common as lc
 
 
 def generate_launch_description():
-    pkg = get_package_share_directory("yoruba_robot")
-    urdf = os.path.join(pkg, "description", "robot.urdf.xacro")
-    rviz_cfg = os.path.join(pkg, "config", "robot.rviz")
-
-    robot_description = {
-        "robot_description": ParameterValue(
-            Command(["xacro ", urdf, " use_sim:=false"]), value_type=str)
-    }
-
-    rsp = Node(package="robot_state_publisher", executable="robot_state_publisher",
-               parameters=[robot_description], output="screen")
-
-    bridge = Node(package="yoruba_robot", executable="robot_bridge",
-                  name="robot_bridge", output="screen")
-
-    rviz = Node(package="rviz2", executable="rviz2", arguments=["-d", rviz_cfg],
-                output="log")
-
-    return LaunchDescription([rsp, bridge, rviz])
+    voice = LaunchConfiguration("voice")
+    drive_real = LaunchConfiguration("drive_real")
+    return LaunchDescription([
+        DeclareLaunchArgument("voice", default_value="true",
+                              description="Start voice_relay (TCP :7447 -> /cmd_vel)."),
+        DeclareLaunchArgument("drive_real", default_value="true",
+                              description="false = never open the ESP32 link."),
+        lc.qt_on_x11(),
+        lc.real_state_publisher(use_sim_time=False),
+        lc.robot_bridge(use_sim_time=False, drive_real=drive_real),
+        lc.environment(use_sim_time=False),
+        lc.voice_relay(voice),
+        lc.rviz("real.rviz", use_sim_time=False),
+    ])

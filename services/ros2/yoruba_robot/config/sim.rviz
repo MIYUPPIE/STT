@@ -1,0 +1,113 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+      - Class: rviz_default_plugins/Grid
+        Name: Grid (10 cm)
+        Enabled: true
+        Cell Size: 0.1
+        Plane Cell Count: 36
+        Color: 160; 160; 164
+        Alpha: 0.35
+        Line Style:
+          Line Width: 0.03
+          Value: Lines
+        Offset: {X: 0, Y: 0, Z: 0.001}
+        Plane: XY
+        Reference Frame: <Fixed Frame>
+        Value: true
+      - Class: rviz_default_plugins/MarkerArray
+        Name: Environment (arena)
+        Enabled: true
+        Namespaces: {}
+        Topic:
+          Depth: 5
+          Durability Policy: Transient Local
+          History Policy: Keep Last
+          Reliability Policy: Reliable
+          Value: /environment
+        Value: true
+      - Class: rviz_default_plugins/RobotModel
+        Name: Gazebo robot
+        Enabled: true
+        Alpha: 1
+        Collision Enabled: false
+        Visual Enabled: true
+        Description Source: Topic
+        Description File: ""
+        Description Topic:
+          Depth: 5
+          Durability Policy: Transient Local
+          History Policy: Keep Last
+          Reliability Policy: Reliable
+          Value: /sim/robot_description
+        TF Prefix: ""
+        Update Interval: 0
+        Value: true
+      - Class: rviz_default_plugins/Odometry
+        Name: Gazebo path
+        Enabled: true
+        Keep: 300
+        Position Tolerance: 0.03
+        Angle Tolerance: 0.15
+        Covariance:
+          Value: false
+        Shape:
+          Value: Arrow
+          Color: 240; 130; 30
+          Alpha: 0.9
+          Shaft Length: 0.06
+          Shaft Radius: 0.006
+          Head Length: 0.025
+          Head Radius: 0.014
+        Topic:
+          Depth: 5
+          Durability Policy: Volatile
+          History Policy: Keep Last
+          Reliability Policy: Reliable
+          Value: /sim_odom
+        Value: true
+      - Class: rviz_default_plugins/TF
+        Name: TF frames
+        Enabled: false
+        Marker Scale: 0.25
+        Show Arrows: false
+        Show Axes: true
+        Show Names: false
+        Update Interval: 0
+        Value: false
+  Enabled: true
+  Global Options:
+    Background Color: 38; 41; 48
+    Fixed Frame: odom
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/Measure
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Follow robot
+      Distance: 1.1
+      Focal Point: {X: 0, Y: 0, Z: 0.04}
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.03
+      Near Clip Distance: 0.005
+      Pitch: 0.62
+      Yaw: 3.6
+      Target Frame: sim_base_footprint
+      Value: Orbit (rviz)
+    Saved: ~
+Window Geometry:
+  Height: 860
+  Width: 1400
+  Hide Left Dock: false
+  Hide Right Dock: true

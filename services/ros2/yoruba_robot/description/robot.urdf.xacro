@@ -1,190 +1,311 @@
 <?xml version="1.0"?>
 <!--
-  robot.urdf.xacro — the digital twin: a 2-wheel differential-drive robot that
-  matches the real chassis (65 mm wheel, 150 mm wheelbase; override from
-  launch). Same model goes to Gazebo (simulated physics) and RViz (visuals + TF
-  from robot_bridge), so sim and reality share one URDF.
+  robot.urdf.xacro — the Yoruba robot: a flat-plate 2WD kit car.
+  Two TT gear motors + 65 mm wheels at the front, one ball caster at the rear,
+  2x18650 battery holder, L298N driver and ESP32-S3 board on top of the plate.
+  Dimensions are the real parts' sizes (see docs/TUTORIAL.md, "Measure your
+  robot"), so RViz shows what is on the floor and Gazebo simulates it.
 
-  Frames (REP-103, +x forward, +z up):
-    base_footprint  -> on the ground (TF root the bridge publishes to)
-    base_link       -> body origin, at the wheel axle height
-    left_wheel, right_wheel, caster_wheel
-    front_marker    -> a small red block on the +x face so RViz orientation is
-                       unambiguous (otherwise a symmetric chassis gives no hint)
+  Frames (REP-103: +x forward, +y left, +z up), all relative to base_link:
+    base_footprint   ground point under the axle centre (TF root; odom -> here)
+    base_link        axle centre, z = wheel_radius above the ground
+    chassis_plate    the flat plate
+    left/right_motor TT gear motors under the plate
+    left/right_wheel continuous joints, axis +y (positive = rolls forward)
+    caster_wheel     rear ball caster (fixed; frictionless in Gazebo)
+    battery, motor_driver, controller   parts on top of the plate
 
-  Materials are defined ONCE at robot scope and referenced by name in each
-  link. RViz2's URDF parser logs a warning (and sometimes drops the colour)
-  when the same material name is redefined per link.
+  Args:
+    prefix   prepended to every LINK name (not joint names). "" for the real
+             robot and for Gazebo; "sim_" for the RViz copy of the Gazebo twin,
+             so both robots coexist in one TF tree.
+    use_sim  emit the Gazebo plugins (only for the model spawned into Gazebo).
 -->
 <robot name="yoruba_robot" xmlns:xacro="http://ros.org/wiki/xacro">
 
-  <xacro:arg name="wheel_radius"     default="0.035"/>
-  <xacro:arg name="wheel_separation" default="0.15"/>
-  <xacro:arg name="wheel_width"      default="0.028"/>
-  <xacro:arg name="body_length"      default="0.20"/>
-  <xacro:arg name="body_width"       default="0.14"/>
-  <xacro:arg name="body_height"      default="0.07"/>
-  <xacro:arg name="caster_radius"    default="0.018"/>
-  <xacro:arg name="use_sim"          default="true"/>
+  <xacro:arg name="prefix"  default=""/>
+  <xacro:arg name="use_sim" default="false"/>
+  <xacro:property name="p" value="$(arg prefix)"/>
 
-  <xacro:property name="wheel_radius"     value="$(arg wheel_radius)"/>
-  <xacro:property name="wheel_separation" value="$(arg wheel_separation)"/>
-  <xacro:property name="wheel_width"      value="$(arg wheel_width)"/>
-  <xacro:property name="body_length"      value="$(arg body_length)"/>
-  <xacro:property name="body_width"       value="$(arg body_width)"/>
-  <xacro:property name="body_height"      value="$(arg body_height)"/>
-  <xacro:property name="caster_radius"    value="$(arg caster_radius)"/>
+  <!-- ===== measured dimensions (metres). Keep wheel_radius / wheel_separation
+       equal to robot_bridge's wheel_radius / wheel_separation parameters. ===== -->
+  <xacro:property name="wheel_radius"     value="0.0325"/>  <!-- 65 mm TT wheel -->
+  <xacro:property name="wheel_width"      value="0.026"/>
+  <xacro:property name="wheel_separation" value="0.150"/>   <!-- tyre centre to tyre centre -->
+  <xacro:property name="plate_length"     value="0.200"/>
+  <xacro:property name="plate_width"      value="0.120"/>
+  <xacro:property name="plate_thickness"  value="0.004"/>
+  <xacro:property name="plate_x"          value="-0.045"/>  <!-- plate centre behind the axle -->
+  <xacro:property name="plate_bottom_z"   value="0.0125"/>  <!-- above the axle: motor + bracket -->
+  <xacro:property name="motor_size_x"     value="0.065"/>
+  <xacro:property name="motor_size_y"     value="0.0225"/>
+  <xacro:property name="motor_size_z"     value="0.019"/>
+  <xacro:property name="motor_x"          value="-0.020"/>  <!-- shaft sits near the motor's front -->
+  <xacro:property name="caster_radius"    value="0.010"/>
+  <xacro:property name="caster_x"         value="-0.120"/>  <!-- negative = rear caster -->
 
-  <!-- ================== materials (global, once) ================== -->
-  <material name="chassis_blue"><color rgba="0.15 0.45 0.90 1.0"/></material>
-  <material name="chassis_dark"><color rgba="0.08 0.20 0.45 1.0"/></material>
-  <material name="wheel_black"><color rgba="0.08 0.08 0.08 1.0"/></material>
-  <material name="rim_grey">   <color rgba="0.40 0.40 0.42 1.0"/></material>
-  <material name="caster_grey"><color rgba="0.65 0.65 0.67 1.0"/></material>
-  <material name="front_red">  <color rgba="0.95 0.20 0.15 1.0"/></material>
+  <xacro:property name="plate_top_z"      value="${plate_bottom_z + plate_thickness}"/>
+  <xacro:property name="motor_y"          value="${wheel_separation/2 - wheel_width/2 - motor_size_y/2 - 0.001}"/>
+  <xacro:property name="PI_2"             value="1.5707963267948966"/>
 
-  <!-- Inertia helpers. Order-of-magnitude correct; mass tuned so the sim robot
-       doesn't tip when a turn command accelerates one wheel. -->
-  <xacro:macro name="box_inertial" params="mass x y z">
+  <!-- ===== materials: defined once, referenced by name ===== -->
+  <material name="acrylic">     <color rgba="0.30 0.62 0.95 0.92"/></material>
+  <material name="tt_yellow">   <color rgba="0.98 0.80 0.10 1.0"/></material>
+  <material name="tyre_black">  <color rgba="0.07 0.07 0.07 1.0"/></material>
+  <material name="spoke_grey">  <color rgba="0.30 0.30 0.32 1.0"/></material>
+  <material name="caster_metal"><color rgba="0.75 0.76 0.78 1.0"/></material>
+  <material name="holder_black"><color rgba="0.12 0.12 0.13 1.0"/></material>
+  <material name="cell_blue">   <color rgba="0.15 0.35 0.80 1.0"/></material>
+  <material name="pcb_red">     <color rgba="0.80 0.12 0.10 1.0"/></material>
+  <material name="pcb_black">   <color rgba="0.10 0.10 0.12 1.0"/></material>
+  <material name="heatsink">    <color rgba="0.05 0.05 0.05 1.0"/></material>
+  <material name="shield_silver"><color rgba="0.82 0.83 0.86 1.0"/></material>
+  <material name="lens_glass">  <color rgba="0.20 0.25 0.35 1.0"/></material>
+  <material name="front_red">   <color rgba="0.95 0.20 0.15 1.0"/></material>
+  <material name="brass">       <color rgba="0.80 0.65 0.30 1.0"/></material>
+
+  <!-- ===== inertia helpers (solid box / solid cylinder about its own axis) ===== -->
+  <xacro:macro name="box_inertia" params="m x y z *origin">
     <inertial>
-      <mass value="${mass}"/>
-      <inertia ixx="${mass*(y*y+z*z)/12}" iyy="${mass*(x*x+z*z)/12}"
-               izz="${mass*(x*x+y*y)/12}" ixy="0" ixz="0" iyz="0"/>
+      <xacro:insert_block name="origin"/>
+      <mass value="${m}"/>
+      <inertia ixx="${m*(y*y+z*z)/12}" iyy="${m*(x*x+z*z)/12}" izz="${m*(x*x+y*y)/12}"
+               ixy="0" ixz="0" iyz="0"/>
     </inertial>
   </xacro:macro>
-  <xacro:macro name="cyl_inertial" params="mass r h">
+  <xacro:macro name="cylinder_inertia_y" params="m r h">  <!-- axis along y -->
     <inertial>
-      <mass value="${mass}"/>
-      <inertia ixx="${mass*(3*r*r+h*h)/12}" iyy="${mass*(3*r*r+h*h)/12}"
-               izz="${mass*r*r/2}" ixy="0" ixz="0" iyz="0"/>
+      <origin xyz="0 0 0"/>
+      <mass value="${m}"/>
+      <inertia ixx="${m*(3*r*r+h*h)/12}" iyy="${m*r*r/2}" izz="${m*(3*r*r+h*h)/12}"
+               ixy="0" ixz="0" iyz="0"/>
     </inertial>
   </xacro:macro>
-
-  <!-- base_footprint sits on the ground; base_link at the wheel axle. -->
-  <link name="base_footprint"/>
-  <joint name="base_footprint_joint" type="fixed">
-    <parent link="base_footprint"/>
-    <child link="base_link"/>
-    <origin xyz="0 0 ${wheel_radius}" rpy="0 0 0"/>
-  </joint>
-
-  <!-- Main chassis plate. Centred over the axle; top surface at body_height
-       (so z=0..body_height in base_link frame). -->
-  <link name="base_link">
-    <visual>
-      <origin xyz="0 0 ${body_height/2}"/>
-      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
-      <material name="chassis_blue"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 ${body_height/2}"/>
-      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
-    </collision>
-    <xacro:box_inertial mass="0.8" x="${body_length}" y="${body_width}" z="${body_height}"/>
-  </link>
-
-  <!-- Lid plate so the chassis reads as a two-tone robot, not a plain box.
-       Fixed to base_link, no own inertia (dimensionless visual). -->
-  <joint name="lid_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="lid"/>
-    <origin xyz="0 0 ${body_height + 0.005}"/>
-  </joint>
-  <link name="lid">
-    <visual>
-      <origin xyz="0 0 0.005"/>
-      <geometry><box size="${body_length*0.9} ${body_width*0.9} 0.01"/></geometry>
-      <material name="chassis_dark"/>
-    </visual>
-  </link>
-
-  <!-- A clearly-visible red block on the +X face: no symmetry ambiguity about
-       which way the robot is heading when you watch it in RViz. -->
-  <joint name="front_marker_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="front_marker"/>
-    <origin xyz="${body_length/2 + 0.01} 0 ${body_height/2}"/>
-  </joint>
-  <link name="front_marker">
-    <visual>
-      <geometry><box size="0.02 ${body_width*0.5} ${body_height*0.6}"/></geometry>
-      <material name="front_red"/>
-    </visual>
-  </link>
-
-  <!-- Wheels. Cylinder's own axis is Z; roll by pi/2 around X so the circular
-       face points sideways (axle along Y, as the joint expects). -->
-  <xacro:macro name="wheel" params="prefix y_sign">
-    <link name="${prefix}_wheel">
-      <visual>
-        <origin rpy="1.5707963 0 0"/>
-        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
-        <material name="wheel_black"/>
-      </visual>
-      <!-- A thin grey rim disc on the outer face of each wheel so the wheel's
-           rotation is visible in RViz (otherwise a plain black cylinder looks
-           static even while it is spinning). -->
-      <visual>
-        <origin xyz="0 ${y_sign*wheel_width*0.5} 0" rpy="1.5707963 0 0"/>
-        <geometry><cylinder radius="${wheel_radius*0.55}" length="0.002"/></geometry>
-        <material name="rim_grey"/>
-      </visual>
-      <collision>
-        <origin rpy="1.5707963 0 0"/>
-        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
-      </collision>
-      <xacro:cyl_inertial mass="0.05" r="${wheel_radius}" h="${wheel_width}"/>
-    </link>
-    <joint name="${prefix}_wheel_joint" type="continuous">
-      <parent link="base_link"/>
-      <child link="${prefix}_wheel"/>
-      <!-- Wheels sit just outboard of the chassis so they are clearly visible. -->
-      <origin xyz="0 ${y_sign*(wheel_separation/2)} 0"/>
-      <axis xyz="0 1 0"/>
+  <xacro:macro name="fixed_part" params="name x y z">
+    <joint name="${name}_joint" type="fixed">
+      <parent link="${p}base_link"/>
+      <child link="${p}${name}"/>
+      <origin xyz="${x} ${y} ${z}"/>
     </joint>
   </xacro:macro>
-  <xacro:wheel prefix="left"  y_sign=" 1"/>
-  <xacro:wheel prefix="right" y_sign="-1"/>
 
-  <!-- Rear ball caster. In Gazebo it's a tiny low-friction sphere so the
-       chassis stays level without a third powered wheel. -->
-  <joint name="caster_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="caster_wheel"/>
-    <origin xyz="${-body_length/2 + caster_radius} 0 ${-wheel_radius + caster_radius}"/>
+  <!-- Four brass standoffs under a board, from the plate top (at local
+       z = -height) up to the board's underside (local z = 0). -->
+  <xacro:macro name="standoffs" params="sx sy height">
+    <xacro:property name="standoff_len" value="${height - 0.0008}"/>
+    <visual><origin xyz="${ sx}  ${ sy} ${-0.0008 - standoff_len/2}"/>
+      <geometry><cylinder radius="0.0018" length="${standoff_len}"/></geometry><material name="brass"/></visual>
+    <visual><origin xyz="${ sx}  ${-sy} ${-0.0008 - standoff_len/2}"/>
+      <geometry><cylinder radius="0.0018" length="${standoff_len}"/></geometry><material name="brass"/></visual>
+    <visual><origin xyz="${-sx}  ${ sy} ${-0.0008 - standoff_len/2}"/>
+      <geometry><cylinder radius="0.0018" length="${standoff_len}"/></geometry><material name="brass"/></visual>
+    <visual><origin xyz="${-sx}  ${-sy} ${-0.0008 - standoff_len/2}"/>
+      <geometry><cylinder radius="0.0018" length="${standoff_len}"/></geometry><material name="brass"/></visual>
+  </xacro:macro>
+
+  <!-- ===== base ===== -->
+  <link name="${p}base_footprint"/>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="${p}base_footprint"/>
+    <child link="${p}base_link"/>
+    <origin xyz="0 0 ${wheel_radius}"/>
   </joint>
-  <link name="caster_wheel">
-    <visual>
-      <geometry><sphere radius="${caster_radius}"/></geometry>
-      <material name="caster_grey"/>
-    </visual>
-    <collision><geometry><sphere radius="${caster_radius}"/></geometry></collision>
-    <xacro:cyl_inertial mass="0.01" r="${caster_radius}" h="${caster_radius*2}"/>
+  <!-- base_link is the axle centre. Tiny mass so it is a valid physics body;
+       the real masses live on the parts. -->
+  <link name="${p}base_link">
+    <xacro:box_inertia m="0.005" x="0.01" y="0.01" z="0.01"><origin xyz="0 0 0"/></xacro:box_inertia>
   </link>
 
+  <!-- ===== the flat chassis plate ===== -->
+  <xacro:fixed_part name="chassis_plate" x="${plate_x}" y="0" z="${plate_bottom_z + plate_thickness/2}"/>
+  <link name="${p}chassis_plate">
+    <visual>
+      <geometry><box size="${plate_length} ${plate_width} ${plate_thickness}"/></geometry>
+      <material name="acrylic"/>
+    </visual>
+    <!-- red strip on the front edge: shows heading at a glance -->
+    <visual>
+      <origin xyz="${plate_length/2 - 0.003} 0 ${plate_thickness/2 + 0.001}"/>
+      <geometry><box size="0.006 ${plate_width*0.8} 0.002"/></geometry>
+      <material name="front_red"/>
+    </visual>
+    <collision>
+      <geometry><box size="${plate_length} ${plate_width} ${plate_thickness}"/></geometry>
+    </collision>
+    <xacro:box_inertia m="0.080" x="${plate_length}" y="${plate_width}" z="${plate_thickness}">
+      <origin xyz="0 0 0"/></xacro:box_inertia>
+  </link>
+
+  <!-- ===== TT gear motors (under the plate, beside each wheel) ===== -->
+  <xacro:macro name="motor" params="side y_sign">
+    <xacro:fixed_part name="${side}_motor" x="${motor_x}" y="${y_sign*motor_y}" z="0"/>
+    <link name="${p}${side}_motor">
+      <visual>
+        <geometry><box size="${motor_size_x} ${motor_size_y} ${motor_size_z}"/></geometry>
+        <material name="tt_yellow"/>
+      </visual>
+      <!-- output shaft stub toward the wheel -->
+      <visual>
+        <origin xyz="${-motor_x} ${y_sign*(motor_size_y/2 + 0.002)} 0" rpy="${PI_2} 0 0"/>
+        <geometry><cylinder radius="0.0027" length="0.004"/></geometry>
+        <material name="caster_metal"/>
+      </visual>
+      <xacro:box_inertia m="0.030" x="${motor_size_x}" y="${motor_size_y}" z="${motor_size_z}">
+        <origin xyz="0 0 0"/></xacro:box_inertia>
+    </link>
+  </xacro:macro>
+  <xacro:motor side="left"  y_sign="1"/>
+  <xacro:motor side="right" y_sign="-1"/>
+
+  <!-- ===== drive wheels: black tyre, yellow rim, grey spokes on the outer
+       face (spokes make rotation visible in RViz) ===== -->
+  <xacro:macro name="wheel" params="side y_sign">
+    <joint name="${side}_wheel_joint" type="continuous">
+      <parent link="${p}base_link"/>
+      <child link="${p}${side}_wheel"/>
+      <origin xyz="0 ${y_sign*wheel_separation/2} 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+    <link name="${p}${side}_wheel">
+      <visual>
+        <origin rpy="${PI_2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="tyre_black"/>
+      </visual>
+      <visual>
+        <origin rpy="${PI_2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius*0.72}" length="${wheel_width + 0.001}"/></geometry>
+        <material name="tt_yellow"/>
+      </visual>
+      <visual>
+        <origin xyz="0 ${y_sign*(wheel_width/2 + 0.001)} 0"/>
+        <geometry><box size="${wheel_radius*1.4} 0.002 0.005"/></geometry>
+        <material name="spoke_grey"/>
+      </visual>
+      <visual>
+        <origin xyz="0 ${y_sign*(wheel_width/2 + 0.001)} 0"/>
+        <geometry><box size="0.005 0.002 ${wheel_radius*1.4}"/></geometry>
+        <material name="spoke_grey"/>
+      </visual>
+      <collision>
+        <origin rpy="${PI_2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <xacro:cylinder_inertia_y m="0.025" r="${wheel_radius}" h="${wheel_width}"/>
+    </link>
+  </xacro:macro>
+  <xacro:wheel side="left"  y_sign="1"/>
+  <xacro:wheel side="right" y_sign="-1"/>
+
+  <!-- ===== rear ball caster: metal housing from the plate down, ball touching
+       the ground (ball bottom at z = 0 in base_footprint) ===== -->
+  <xacro:property name="caster_z" value="${-wheel_radius + caster_radius}"/>
+  <xacro:property name="housing_len" value="${plate_bottom_z - caster_z - 0.003}"/>
+  <xacro:fixed_part name="caster_wheel" x="${caster_x}" y="0" z="${caster_z}"/>
+  <link name="${p}caster_wheel">
+    <visual>
+      <geometry><sphere radius="${caster_radius}"/></geometry>
+      <material name="caster_metal"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 ${0.003 + housing_len/2}"/>
+      <geometry><cylinder radius="${caster_radius*1.3}" length="${housing_len}"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <collision>
+      <geometry><sphere radius="${caster_radius}"/></geometry>
+    </collision>
+    <xacro:box_inertia m="0.010" x="0.02" y="0.02" z="0.02"><origin xyz="0 0 0"/></xacro:box_inertia>
+  </link>
+
+  <!-- ===== on top of the plate (z measured from base_link) ===== -->
+  <!-- 2x18650 battery holder at the rear -->
+  <xacro:fixed_part name="battery" x="-0.100" y="0" z="${plate_top_z + 0.006}"/>
+  <link name="${p}battery">
+    <visual>
+      <geometry><box size="0.077 0.041 0.012"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0.0095 0.004" rpy="0 ${PI_2} 0"/>
+      <geometry><cylinder radius="0.009" length="0.065"/></geometry>
+      <material name="cell_blue"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.0095 0.004" rpy="0 ${PI_2} 0"/>
+      <geometry><cylinder radius="0.009" length="0.065"/></geometry>
+      <material name="cell_blue"/>
+    </visual>
+    <xacro:box_inertia m="0.110" x="0.077" y="0.041" z="0.021"><origin xyz="0 0 0.004"/></xacro:box_inertia>
+  </link>
+
+  <!-- L298N dual H-bridge: red PCB on standoffs + black heatsink -->
+  <xacro:fixed_part name="motor_driver" x="-0.036" y="0" z="${plate_top_z + 0.005}"/>
+  <link name="${p}motor_driver">
+    <visual>
+      <geometry><box size="0.043 0.043 0.0016"/></geometry>
+      <material name="pcb_red"/>
+    </visual>
+    <visual>
+      <origin xyz="0.004 0 0.0133"/>
+      <geometry><box size="0.016 0.023 0.025"/></geometry>
+      <material name="heatsink"/>
+    </visual>
+    <xacro:standoffs sx="0.0185" sy="0.0185" height="0.005"/>
+    <xacro:box_inertia m="0.030" x="0.043" y="0.043" z="0.027"><origin xyz="0 0 0.008"/></xacro:box_inertia>
+  </link>
+
+  <!-- ESP32-S3 board at the front: black PCB, silver module shield, camera
+       lens facing forward -->
+  <xacro:fixed_part name="controller" x="0.022" y="0" z="${plate_top_z + 0.008}"/>
+  <link name="${p}controller">
+    <visual>
+      <geometry><box size="0.0635 0.0254 0.0016"/></geometry>
+      <material name="pcb_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.008 0 0.0023"/>
+      <geometry><box size="0.025 0.018 0.003"/></geometry>
+      <material name="shield_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0.027 0 0.004"/>
+      <geometry><box size="0.008 0.008 0.006"/></geometry>
+      <material name="pcb_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0325 0 0.004" rpy="0 ${PI_2} 0"/>
+      <geometry><cylinder radius="0.0032" length="0.003"/></geometry>
+      <material name="lens_glass"/>
+    </visual>
+    <xacro:standoffs sx="0.028" sy="0.0095" height="0.008"/>
+    <xacro:box_inertia m="0.010" x="0.0635" y="0.0254" z="0.008"><origin xyz="0 0 0.002"/></xacro:box_inertia>
+  </link>
+
+  <!-- ===== Gazebo only ===== -->
   <xacro:if value="$(arg use_sim)">
-    <!-- Gazebo plugin surfaces: wheels grippy, caster frictionless so a spin
-         command rotates in place instead of locking on the ball. -->
     <gazebo reference="left_wheel"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
     <gazebo reference="right_wheel"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
     <gazebo reference="caster_wheel"><mu1>0.0</mu1><mu2>0.0</mu2></gazebo>
 
-    <!-- diff_drive publishes /cmd_vel -> wheels, and /odom + TF, matching the
-         real robot_bridge. Both targets subscribe to the same /cmd_vel, so one
-         voice command drives both at the same time (the digital twin). -->
     <gazebo>
-      <plugin filename="gz-sim-diff-drive-system"
-              name="gz::sim::systems::DiffDrive">
+      <!-- /cmd_vel_applied in (robot_bridge's shaped command: what the real
+           robot executes), /sim_odom + odom->sim_base_footprint TF out. The child
+           frame is the PREFIXED name so RViz draws this pose on the sim_ copy
+           of the model, next to the real robot. -->
+      <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
         <left_joint>left_wheel_joint</left_joint>
         <right_joint>right_wheel_joint</right_joint>
         <wheel_separation>${wheel_separation}</wheel_separation>
         <wheel_radius>${wheel_radius}</wheel_radius>
+        <max_linear_acceleration>2.3</max_linear_acceleration>  <!-- firmware RAMP_MS 150: 0.35 m/s in 0.15 s -->
+        <max_angular_acceleration>23</max_angular_acceleration>
         <odom_publish_frequency>50</odom_publish_frequency>
-        <topic>cmd_vel</topic>
-        <odom_topic>sim_odom</odom_topic>
-        <frame_id>sim_odom</frame_id>
-        <child_frame_id>sim_base_link</child_frame_id>
-        <tf_topic>sim_tf</tf_topic>
+        <topic>/cmd_vel_applied</topic>
+        <odom_topic>/sim_odom</odom_topic>
+        <frame_id>odom</frame_id>
+        <child_frame_id>sim_base_footprint</child_frame_id>
+        <tf_topic>/sim_tf</tf_topic>
       </plugin>
       <plugin filename="gz-sim-joint-state-publisher-system"
               name="gz::sim::systems::JointStatePublisher">
